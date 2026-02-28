@@ -1,0 +1,189 @@
+xrun(64): 24.09-s005: (c) Copyright 1995-2025 Cadence Design Systems, Inc.
+TOOL:	xrun(64)	24.09-s005: Started on Dec 25, 2025 at 01:32:51 +07
+xrun
+	-access +rwc
+	-f ./flist.f
+		-sv
+		-timescale 1ns/100ps
+		./../00_src/add_sub_32_bit.sv
+		./../00_src/alu.sv
+		./../00_src/branch_taken.sv
+		./../00_src/brc.sv
+		./../00_src/cache.sv
+		./../00_src/control_unit_new.sv
+		./../00_src/decode_cycle.sv
+		./../00_src/execute_cycle.sv
+		./../00_src/fetch_cycle.sv
+		./../00_src/forward_unit.sv
+		./../00_src/full_adder.sv
+		./../00_src/hazard_detection.sv
+		./../00_src/imm_gen.sv
+		./../00_src/inst_memory.sv
+		./../00_src/load_unit.sv
+		./../00_src/lsu_new.sv
+		./../00_src/memory_cycle.sv
+		./../00_src/mux2_1.sv
+		./../00_src/mux3_1.sv
+		./../00_src/pc.sv
+		./../00_src/pipeline.sv
+		./../00_src/Pipeline_Tb.sv
+		./../00_src/regfile.sv
+		./../00_src/shift_left_logical.sv
+		./../00_src/shift_right_arithmetic.sv
+		./../00_src/shift_right_logical.sv
+		./../00_src/slt_sltu.sv
+		./../00_src/sram.sv
+		./../00_src/writeback_cycle.sv
+		./../01_bench/driver.sv
+		./../01_bench/scoreboard.sv
+		./../01_bench/tbench.sv
+		./../01_bench/tlib.svh
+Recompiling... reason: file '../00_src/lsu_new.sv' is newer than expected.
+	expected: Thu Dec 25 01:21:41 2025
+	actual:   Thu Dec 25 01:25:09 2025
+file: ./../00_src/execute_cycle.sv
+    logic [31:0] inst_reg, inst_tmp;;
+                                    |
+xmvlog: *W,UEXPSC (./../00_src/execute_cycle.sv,79|36): Ignored unexpected semicolon following SystemVerilog description keyword (inst_tmp).
+file: ./../01_bench/tbench.sv
+	module worklib.tbench:sv
+		errors: 0, warnings: 0
+		Caching library 'worklib' ....... Done
+	Elaborating the design hierarchy:
+    add_sub_32_bit pc_add4_at_fetch (
+                                  |
+xmelab: *W,CUVWSP (../00_src/fetch_cycle.sv,43|34): 1 output port was not connected:
+xmelab: (../00_src/add_sub_32_bit.sv,8): Cout
+
+    control_unit_new control_unit_at_decode (
+                                          |
+xmelab: *W,CUVWSP (../00_src/decode_cycle.sv,107|42): 1 output port was not connected:
+xmelab: (../00_src/control_unit_new.sv,6): o_insn_vld_ctrl
+
+    execute_cycle execute_top(
+                            |
+xmelab: *W,CUVWSI (../00_src/pipeline.sv,170|28): 1 input port was not connected:
+xmelab: (../00_src/execute_cycle.sv,35): i_stall
+
+    add_sub_32_bit add_sub_alu( 
+                             |
+xmelab: *W,CUVWSP (../00_src/alu.sv,24|29): 1 output port was not connected:
+xmelab: (../00_src/add_sub_32_bit.sv,8): Cout
+
+    add_sub_32_bit PC_add4_at_memory (
+                                   |
+xmelab: *W,CUVWSP (../00_src/memory_cycle.sv,111|35): 1 output port was not connected:
+xmelab: (../00_src/add_sub_32_bit.sv,8): Cout
+
+	Top level design units:
+		$unit_0x7387c1e4
+		load_unit
+		tbench
+	Building instance overlay tables: .................... Done
+	Generating native compiled code:
+		worklib.scoreboard:sv <0x565c92df>
+			streams:   9, words: 15328
+		worklib.mux_3_1_lsu:sv <0x245e53f2>
+			streams:   4, words:   981
+		worklib.data_trsf:sv <0x05f13ebd>
+			streams:   2, words:  5094
+		worklib.output_buffer:sv <0x67cf3728>
+			streams:  32, words: 10977
+		worklib.demux_sel_mem:sv <0x0e3f42e7>
+			streams:   1, words:  1186
+		worklib.mask_store:sv <0x5fd1d28c>
+			streams:   1, words:  1074
+		worklib.mask_load:sv <0x7ff6db60>
+			streams:   1, words:  2065
+		worklib.mask_create:sv <0x1b8d9399>
+			streams:   1, words:   969
+		worklib.lsu_new:sv <0x34fe4831>
+			streams:  50, words: 14692
+		worklib.memory_cycle:sv <0x26bb9e0a>
+			streams:  58, words: 20352
+		worklib.pipelined:sv <0x0099901b>
+			streams: 125, words: 32870
+		worklib.tbench:sv <0x2c3e8647>
+			streams:  42, words: 10616
+	Building instance specific data structures.
+	Loading native compiled code:     .................... Done
+	Design hierarchy summary:
+		                   Instances  Unique
+		Modules:                 239      38
+		Registers:               865     451
+		Scalar wires:          1,738       -
+		Expanded wires:          132       5
+		Vectored wires:          389       -
+		Always blocks:            54      49
+		Initial blocks:            8       8
+		Cont. assignments:       299     110
+		Pseudo assignments:    1,040       -
+		Compilation units:         1       1
+		Process Clocks:           16       3
+		Simulation timescale:  100ps
+	Writing initial simulation snapshot: worklib.load_unit:sv
+Loading snapshot worklib.load_unit:sv .................... Done
+xcelium> source /home/yellow/ctmt_l01_l02_4/tools/eda/cadence/XCELIUM2409/tools/xcelium/files/xmsimrc
+xcelium> run
+
+PIPELINE - ISA tests
+
+add......PASS
+addi.....PASS
+sub......PASS
+and......PASS
+andi.....PASS
+or.......PASS
+ori......PASS
+xor......PASS
+xori.....PASS
+slt......PASS
+slti.....PASS
+sltu.....PASS
+sltiu....PASS
+sll......PASS
+slli.....PASS
+srl......PASS
+srli.....PASS
+sra......PASS
+srai.....PASS
+lw.......PASS
+lh.......PASS
+lhu......PASS
+lb.......PASS
+lbu......PASS
+sw.......PASS
+sh.......ERROR
+sb.......ERROR
+auipc....PASS
+lui......PASS
+beq......PASS
+bne......PASS
+blt......PASS
+bltu.....PASS
+bge......PASS
+bgeu.....PASS
+jal......PASS
+jalr.....PASS
+malgn....ERROR
+iosw.....PASS
+
+=================== Result ===================
+Total Cache Hits            = 156
+Total Cache Misses          = 44
+Total Clock Cycles Executed = 9518
+Total Instructions Executed = 4839
+Total Branch Instructions   = 1778
+Total Branch Mispredictions = 1458
+
+----------------------------------------------
+Cache Hit Rate              = 78.00 %
+Instruction Per Cycle (IPC) = 0.51
+Branch Misprediction Rate   = 82.00 %
+
+END of ISA tests
+
+Simulation complete via $finish(1) at time 38124 NS + 1
+../01_bench/scoreboard.sv:109         $finish;
+xcelium> exit
+TOOL:	xrun(64)	24.09-s005: Exiting on Dec 25, 2025 at 01:32:54 +07  (total: 00:00:03)
