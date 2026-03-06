@@ -3,6 +3,7 @@
 `define LSU
 `include "mux3_1.sv"
 `include "cache.sv"
+`include "cache_l2.sv"
 `include "sram.sv"
 /*------------------------------------------------------------*/
 
@@ -80,24 +81,19 @@ module lsu_new (
   logic        cache_done;
   logic        cache_hit_dbg;
   logic        cache_miss_dbg;
-  logic        sram_enb;
-  logic [31:0] sram_addr;
-  logic        sram_wr_en;
-  logic [31:0] sram_wdata;
+  logic        l1_l2_req_valid;
+  logic [31:0] l1_l2_req_addr;
+  logic        l1_l2_req_wr_en;
+  logic [31:0] l1_l2_req_wdata;
+  logic [31:0] l2_l1_resp_rdata;
+  logic        l2_l1_resp_valid;
+
+  logic        l2_sram_enb;
+  logic [31:0] l2_sram_addr;
+  logic        l2_sram_wr_en;
+  logic [31:0] l2_sram_wdata;
   logic [31:0] sram_rdata;
   logic        sram_ready;
-
-  // Instantiate SRAM
-  sram u_sram (
-    .i_clk      (i_clk),
-    .i_reset    (i_reset),
-    .i_sram_enb (sram_enb),
-    .i_wr_en    (sram_wr_en),
-    .i_addr     (sram_addr),
-    .i_wdata    (sram_wdata),
-    .o_rdata    (sram_rdata),
-    .o_ready    (sram_ready)
-  );
 
   // Create byte mask for cache write
   mask_create u_mask_create (
@@ -126,19 +122,53 @@ module lsu_new (
     .i_wr_en       (i_lsu_wren),
     .i_addr        (i_lsu_addr),
     .i_byte_mask   (byte_mask),
-    .i_wdata       (/*st_cache_data*/ i_st_data),
+    .i_wdata       (st_cache_data),
     .o_rdata       (ld_cache_data /*data_out_3*/),
     .o_hit_debug   (cache_hit_dbg),
     .o_miss_debug  (cache_miss_dbg),
     .o_stall       (o_cache_stall),
     .o_cache_done  (o_cache_done),
     // SRAM interface
-    .o_sram_enb    (sram_enb),
-    .o_sram_addr   (sram_addr),
-    .o_sram_wr_en  (sram_wr_en),
-    .o_sram_wdata  (sram_wdata),
-    .i_sram_rdata  (sram_rdata),
-    .i_sram_ready  (sram_ready)
+    .o_sram_enb    (l1_l2_req_valid),
+    .o_sram_addr   (l1_l2_req_addr),
+    .o_sram_wr_en  (l1_l2_req_wr_en),
+    .o_sram_wdata  (l1_l2_req_wdata),
+    .i_sram_rdata  (l2_l1_resp_rdata),
+    .i_sram_ready  (l2_l1_resp_valid)
+  );
+
+  // L2 cache serves L1 misses/hit-under-L2, and accesses SRAM on L2 miss
+  cache_l2 u_cache_l2 (
+    .i_clk          (i_clk),
+    .i_reset        (i_reset),
+    .i_req_valid    (l1_l2_req_valid),
+    .i_req_wr_en    (l1_l2_req_wr_en),
+    .i_req_byte_mask(l1_l2_req_wr_en ? 4'b1111 : 4'b0000),
+    .i_req_addr     (l1_l2_req_addr),
+    .i_req_wdata    (l1_l2_req_wdata),
+    .o_resp_rdata   (l2_l1_resp_rdata),
+    .o_resp_valid   (l2_l1_resp_valid),
+    .o_stall        (),
+    .o_hit_debug    (),
+    .o_miss_debug   (),
+    .o_sram_enb     (l2_sram_enb),
+    .o_sram_addr    (l2_sram_addr),
+    .o_sram_wr_en   (l2_sram_wr_en),
+    .o_sram_wdata   (l2_sram_wdata),
+    .i_sram_rdata   (sram_rdata),
+    .i_sram_ready   (sram_ready)
+  );
+
+  // SRAM is now behind L2
+  sram u_sram (
+    .i_clk      (i_clk),
+    .i_reset    (i_reset),
+    .i_sram_enb (l2_sram_enb),
+    .i_wr_en    (l2_sram_wr_en),
+    .i_addr     (l2_sram_addr),
+    .i_wdata    (l2_sram_wdata),
+    .o_rdata    (sram_rdata),
+    .o_ready    (sram_ready)
   );
 
 /*-------- DEMUX --------*/

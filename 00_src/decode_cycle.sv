@@ -81,12 +81,12 @@ module decode_cycle(
     logic ctrl_reg, ctrl;
 
     //For decode forwarding
-    logic [4:0] rd_addr_execute;
+    //logic [4:0] rd_addr_execute;
     logic [4:0] rs1_addr_decode;
     logic [4:0] rs2_addr_decode;
     logic sel_forward_decode;
 
-    assign rd_addr_execute = o_decode_inst_ex[11:7];
+    //assign rd_addr_execute = o_decode_inst_ex[11:7];
     assign rs1_addr_decode = i_decode_inst[19:15];
     assign rs2_addr_decode = i_decode_inst[24:20];
 

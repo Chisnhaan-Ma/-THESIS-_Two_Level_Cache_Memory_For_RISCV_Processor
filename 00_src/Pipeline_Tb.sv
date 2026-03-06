@@ -23,7 +23,7 @@ module Pipeline_Cache_Tb ();
         #7ps;
         force  tb_reset = 0; 
         force  tb_io_sw = 32'ha;
-        #200000ps;
+        #100000ps;
         $finish;  
     end
 

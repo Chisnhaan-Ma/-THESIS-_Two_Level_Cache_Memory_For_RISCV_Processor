@@ -59,6 +59,25 @@ module cache (
 
     logic dirty_debug;
     logic stall;
+
+    function automatic logic [31:0] write_with_mask(
+        input logic [31:0] old_data,
+        input logic [31:0] new_data,
+        input logic [3:0]  byte_mask
+    );
+        begin
+            case (byte_mask)
+                4'b0001: write_with_mask = {old_data[31:8],  new_data[7:0]};
+                4'b0010: write_with_mask = {old_data[31:16], new_data[15:8],  old_data[7:0]};
+                4'b0100: write_with_mask = {old_data[31:24], new_data[23:16], old_data[15:0]};
+                4'b1000: write_with_mask = {new_data[31:24], old_data[23:0]};
+                4'b0011: write_with_mask = {old_data[31:16], new_data[15:0]};
+                4'b1100: write_with_mask = {new_data[31:16], old_data[15:0]};
+                4'b1111: write_with_mask = new_data;
+                default: write_with_mask = old_data;
+            endcase
+        end
+    endfunction
     // HIT CHECK (ONLY WHEN i_mem_access=1)
     // ---------------------------
     logic [NUM_WAY-1:0] way_hit;
@@ -107,9 +126,8 @@ module cache (
     typedef enum logic [3:0] {
         IDLE          = 4'b0000,
         CHECK_CACHE   = 4'b0001,
-        WRITEBACK_RAM = 4'b0010,
-        RAM_READ      = 4'b0011,
-        RAM_WRITE     = 4'b0100,
+        WRITEBACK_L2  = 4'b0010,
+        L2_READ       = 4'b0011,
         UPDATE_CACHE  = 4'b0101,
         OUTPUT_DATA   = 4'b0110
     } state_t;
@@ -145,45 +163,31 @@ module cache (
                     // CRITICAL: victim_way points to the FIFO victim for this set
                     // Check CURRENT victim_way's dirty bit at THIS cycle
                     if (dirty[index][victim_way]) begin
-                        next_state = WRITEBACK_RAM;  // Writeback dirty victim first
+                        next_state = WRITEBACK_L2;  // Writeback dirty victim to L2 first
                         //$display("MISS DIRTY");
                     end
-                    else if (!req_wr_en_reg) begin
-                        next_state = RAM_READ;       // Load miss, victim is clean
-                        //$display("READ MISS CLEAN");
-                    end
                     else begin
-                        next_state = RAM_WRITE;      // Store miss, victim is clean
-                        //$display("WRITE MISS CLEAN");
+                        next_state = L2_READ;       // Always read allocate from L2 on miss
+                        //$display("READ MISS CLEAN");
                     end
                     //$display("MISS ADDR = %h", miss_addr_reg);
                 end
             end
-            WRITEBACK_RAM: begin
-                // Writing dirty victim to SRAM
+            WRITEBACK_L2: begin
+                // Writing dirty victim to L2
                 // Use LATCHED victim_dirty_reg (captured at CHECK_CACHE time)
                 if(i_sram_ready) begin
-                    // After writeback completes, continue with original miss operation
-                    if (miss_wr_en_reg == 1'b0)
-                        next_state = RAM_READ;   // Was a LOAD miss
-                    else
-                        next_state = RAM_WRITE;  // Was a STORE miss
+                    // After writeback, request line from L2
+                    next_state = L2_READ;
                 end else
-                    next_state = WRITEBACK_RAM;  // Wait for SRAM ready
+                    next_state = WRITEBACK_L2;  // Wait for L2 ready
             end
-            RAM_READ: begin
-                // Reading from SRAM (LOAD miss)
+            L2_READ: begin
+                // Reading missed line from L2
                 if(i_sram_ready)
                     next_state = UPDATE_CACHE;
                 else
-                    next_state = RAM_READ;
-            end
-            RAM_WRITE: begin
-                // Writing to SRAM (STORE miss)
-                if(i_sram_ready)
-                    next_state = UPDATE_CACHE;
-                else
-                    next_state = RAM_WRITE;
+                    next_state = L2_READ;
             end
             UPDATE_CACHE: begin
                 next_state = OUTPUT_DATA;
@@ -215,7 +219,7 @@ module cache (
             miss_wr_en_reg <= 1'b0;
             victim_way_reg <= {$clog2(NUM_WAY){1'b0}};
             miss_index_reg <= 2'b0;
-            miss_tag_reg   <= 30'b0;
+            miss_tag_reg   <= 28'b0;
             victim_addr_reg<= 32'b0;
             victim_dirty_reg <= 1'b0;
             need_writeback_reg <= 1'b0;
@@ -230,7 +234,7 @@ module cache (
                     valid[s][w] <= 1'b0;
                     dirty[s][w] <= 1'b0;
                     dirty_debug <= 0;
-                    tag_array[s][w] <= 30'b0;
+                    tag_array[s][w] <= 28'b0;
                     data_array[s][w] <= 32'b0;
                 end
             end
@@ -241,18 +245,6 @@ module cache (
             if (current_state == IDLE && i_mem_access) begin
                 req_addr_reg <= i_addr;
                 req_wdata_reg <= i_wdata;
-                /*
-                case (i_byte_mask)
-                    4'b0001: req_wdata_reg <= {24'b0, i_wdata[7:0]};   // SB
-                    4'b0010: req_wdata_reg <= {16'b0, i_wdata[15:8], 8'b0}; // SH
-                    4'b0100: req_wdata_reg <= {8'b0, i_wdata[23:16], 16'b0}; // SH
-                    4'b1000: req_wdata_reg <= {i_wdata[31:24], 24'b0}; // SH
-                    4'b0011: req_wdata_reg <= {16'b0, i_wdata[15:0]}; // SW (lower half)
-                    4'b1100: req_wdata_reg <= {i_wdata[31:16], 16'b0}; // SW (upper half)
-                    4'b1111: req_wdata_reg <= i_wdata; // SW
-                    default: req_wdata_reg <= i_wdata; // SW or unsupported mask
-                endcase
-                */
                 req_wr_en_reg <= i_wr_en;
                 req_byte_mask_reg <= i_byte_mask;
             end
@@ -288,27 +280,17 @@ module cache (
             if (current_state == UPDATE_CACHE) begin
                 // Update victim cache line with SRAM data
                 tag_array[miss_index_reg][victim_way_reg]  <= miss_tag_reg;
-                data_array[miss_index_reg][victim_way_reg] <= i_sram_rdata;
                 valid[miss_index_reg][victim_way_reg]      <= 1'b1;
 
                 // Set dirty based on operation type
                 if (miss_wr_en_reg) begin
                     // STORE operation: overwrite with write data and mark dirty
-                    //data_array[miss_index_reg][victim_way_reg] <= miss_wdata_reg;
-                    case (req_byte_mask_reg)
-                        4'b0001: data_array[miss_index_reg][victim_way_reg] <= {data_array[miss_index_reg][victim_way_reg][31:8], miss_wdata_reg[7:0]};   // SB
-                        4'b0010: data_array[miss_index_reg][victim_way_reg] <= {data_array[miss_index_reg][victim_way_reg][31:16], miss_wdata_reg[7:0], data_array[miss_index_reg][victim_way_reg][7:0]}; // SH
-                        4'b0100: data_array[miss_index_reg][victim_way_reg] <= {data_array[miss_index_reg][victim_way_reg][31:24], miss_wdata_reg[7:0], data_array[miss_index_reg][victim_way_reg][15:0]}; // SH
-                        4'b1000: data_array[miss_index_reg][victim_way_reg] <= {miss_wdata_reg[7:0], data_array[miss_index_reg][victim_way_reg][23:0]}; // SH
-                        4'b0011: data_array[miss_index_reg][victim_way_reg] <= {data_array[miss_index_reg][victim_way_reg][31:16], miss_wdata_reg[15:0]}; // SW (lower half)
-                        4'b1100: data_array[miss_index_reg][victim_way_reg] <= {miss_wdata_reg[15:0], data_array[miss_index_reg][victim_way_reg][15:0]}; // SW (upper half)
-                        4'b1111: data_array[miss_index_reg][victim_way_reg] <= miss_wdata_reg; // SW
-                        default: data_array[miss_index_reg][victim_way_reg] <= miss_wdata_reg; // SW or unsupported mask
-                    endcase
+                    data_array[miss_index_reg][victim_way_reg] <= write_with_mask(i_sram_rdata, miss_wdata_reg, req_byte_mask_reg);
                     dirty[miss_index_reg][victim_way_reg]      <= 1'b1;
                     dirty_debug <= 1;
                 end else begin
                     // LOAD operation: data from SRAM, mark clean
+                    data_array[miss_index_reg][victim_way_reg] <= i_sram_rdata;
                     dirty[miss_index_reg][victim_way_reg]      <= 1'b0;
                     dirty_debug <= 0;
                 end
@@ -324,17 +306,7 @@ module cache (
                 // Write hit: update data and mark dirty
                 dirty[index][hit_way]      <= 1'b1;
                 dirty_debug <= 1;
-                //data_array[index][hit_way] <= req_wdata_reg;
-                case (req_byte_mask_reg)
-                    4'b0001: data_array[index][hit_way] <= {data_array[index][hit_way][31:8], req_wdata_reg[7:0]};   // SB
-                    4'b0010: data_array[index][hit_way] <= {data_array[index][hit_way][31:16], req_wdata_reg[7:0], data_array[index][hit_way][7:0]}; // SH
-                    4'b0100: data_array[index][hit_way] <= {data_array[index][hit_way][31:24], req_wdata_reg[7:0], data_array[index][hit_way][15:0]}; // SH
-                    4'b1000: data_array[index][hit_way] <= {req_wdata_reg[7:0], data_array[index][hit_way][23:0]}; // SH
-                    4'b0011: data_array[index][hit_way] <= {data_array[index][hit_way][31:16], req_wdata_reg[15:0]}; // SW (lower half)
-                    4'b1100: data_array[index][hit_way] <= {req_wdata_reg[15:0], data_array[index][hit_way][15:0]}; // SW (upper half)
-                    4'b1111: data_array[index][hit_way] <= req_wdata_reg; // SW
-                    default: data_array[index][hit_way] <= req_wdata_reg; // SW or unsupported mask
-                endcase
+                data_array[index][hit_way] <= write_with_mask(data_array[index][hit_way], req_wdata_reg, req_byte_mask_reg);
             end
         end
     end
@@ -347,6 +319,12 @@ module cache (
             IDLE: begin
                 // Idle: no activity
                 stall = 1'b0;
+                o_sram_enb = 1'b0;
+                o_sram_addr = 32'b0;
+                o_sram_wr_en = 1'b0;
+                o_sram_wdata = 32'b0;
+                o_cache_done = 1'b0;
+                o_rdata = 32'b0;
             end
 
             CHECK_CACHE: begin
@@ -359,8 +337,8 @@ module cache (
                 //o_rdata      = 32'b0; // Default read data
             end
 
-            WRITEBACK_RAM: begin
-                // Write dirty victim back to SRAM
+            WRITEBACK_L2: begin
+                // Write dirty victim back to L2
                 stall      = 1'b1;
                 o_sram_enb   = 1'b1;
                 o_sram_addr  = victim_addr_reg;  // Victim's original address
@@ -369,24 +347,14 @@ module cache (
                 //$display("WRITEBACK ADDR: %h, DATA: %h, TIME = %d", victim_addr_reg, data_array[miss_index_reg][victim_way_reg], $time);
             end
 
-            RAM_READ: begin
-                // LOAD miss: read from SRAM
+            L2_READ: begin
+                // LOAD missed line from L2
                 stall      = 1'b1;
                 o_sram_enb   = 1'b1;
                 o_sram_addr  = miss_addr_reg;
                 o_sram_wr_en = 1'b0;  // Read mode
                 o_sram_wdata = 32'b0;
                 //$display("RAM READ ADDR: %h, TIME = %d", miss_addr_reg, $time);
-            end
-
-            RAM_WRITE: begin
-                // STORE miss: write to SRAM
-                stall      = 1'b1;
-                o_sram_enb   = 1'b1;
-                o_sram_addr  = miss_addr_reg;
-                o_sram_wr_en = 1'b1;  // Write mode
-                o_sram_wdata = miss_wdata_reg;
-                //$display("RAM WRITE ADDR: %h, DATA: %h, TIME = %d", miss_addr_reg, miss_wdata_reg, $time);
             end
 
             UPDATE_CACHE: begin
@@ -412,7 +380,6 @@ module cache (
                     o_rdata = data_array[hit_index_reg][hit_way_reg];
                 else
                     o_rdata = data_array[miss_index_reg][victim_way_reg];
-                //$display("OUTPUT DATA ADDR: %h, DATA: %h, TIME = %d", miss_addr_reg, o_rdata, $time);
             end
 
             default: begin
