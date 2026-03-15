@@ -3,6 +3,7 @@
 `define LSU
 `include "mux3_1.sv"
 `include "cache.sv"
+`include "cache_v2.sv"
 `include "cache_l2.sv"
 `include "sram.sv"
 /*------------------------------------------------------------*/
@@ -115,7 +116,7 @@ module lsu_new (
     .data_to_cache (st_cache_data)
   );
   // Instantiate Cache; memory access only when demux selects data memory
-  cache u_cache (
+  cache_v2 u_cache (
     .i_clk         (i_clk),
     .i_reset       (i_reset),
     .i_mem_access  (en_datamem && i_mem_access),
@@ -129,12 +130,12 @@ module lsu_new (
     .o_stall       (o_cache_stall),
     .o_cache_done  (o_cache_done),
     // SRAM interface
-    .o_sram_enb    (l1_l2_req_valid),
-    .o_sram_addr   (l1_l2_req_addr),
-    .o_sram_wr_en  (l1_l2_req_wr_en),
-    .o_sram_wdata  (l1_l2_req_wdata),
-    .i_sram_rdata  (l2_l1_resp_rdata),
-    .i_sram_ready  (l2_l1_resp_valid)
+    .o_cache_l2_enb    (l1_l2_req_valid),
+    .o_cache_l2_addr   (l1_l2_req_addr),
+    .o_cache_l2_wr_en  (l1_l2_req_wr_en),
+    .o_cache_l2_wdata  (l1_l2_req_wdata),
+    .i_cache_l2_rdata  (l2_l1_resp_rdata),
+    .i_cache_l2_ready  (l2_l1_resp_valid)
   );
 
   // L2 cache serves L1 misses/hit-under-L2, and accesses SRAM on L2 miss
