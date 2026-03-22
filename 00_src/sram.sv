@@ -1,6 +1,6 @@
 `ifndef SRAM_SIMPLE
 `define SRAM_SIMPLE
-
+//`include "sram_model.sv"
 // Simple synchronous SRAM to use with the cache testbench
 // - 32-bit data, word addressed by i_addr[31:2]
 // - o_ready follows i_sram_enb with 1-cycle latency
@@ -44,6 +44,24 @@ module sram (
             end
         end
     end
+
+// synopsys translate_off
+    always @(posedge i_clk) begin
+        if (!i_reset && i_sram_enb) begin
+            if (i_addr[31:2] < DEPTH) begin
+                if (i_wr_en)
+                    $display("[MAIN MEM WRITE] t=%0t addr=0x%08h index=%0d data=0x%08h",
+                        $time, i_addr, i_addr[31:2], i_wdata);
+                else
+                    $display("[MAIN MEM READ ] t=%0t addr=0x%08h index=%0d data=0x%08h",
+                        $time, i_addr, i_addr[31:2], mem[i_addr[31:2]]);
+            end else begin
+                $display("[MAIN MEM OOR  ] t=%0t addr=0x%08h index=%0d",
+                    $time, i_addr, i_addr[31:2]);
+            end
+        end
+    end
+// synopsys translate_on
 
     // combinational read
 

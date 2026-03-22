@@ -1,5 +1,5 @@
 ﻿// Auto-generated synthesis bundle from 00_src .sv files
-// Generated: 2026-03-06 10:09:51
+// Generated: 2026-03-22 13:06:18
 
 
 // ===== BEGIN FILE: add_sub_32_bit.sv =====
@@ -130,7 +130,7 @@ module branch_taken (
     localparam BGE = 3'b101;
     localparam BLTU = 3'b110;
     localparam BGEU = 3'b111;
-	always_comb begin
+	always @ (*) begin
         if (i_inst_mem[6:0] == 7'b1100011) begin : B_TYPE
             case (i_inst_mem[14:12])
                 BEQ:   o_pc_sel = i_br_equal_mem;    //BEQ
@@ -519,6 +519,12 @@ module cache (
             IDLE: begin
                 // Idle: no activity
                 stall = 1'b0;
+                o_sram_enb = 1'b0;
+                o_sram_addr = 32'b0;
+                o_sram_wr_en = 1'b0;
+                o_sram_wdata = 32'b0;
+                o_cache_done = 1'b0;
+                o_rdata = 32'b0;
             end
 
             CHECK_CACHE: begin
@@ -842,6 +848,858 @@ endmodule
 // ===== END FILE: cache_l2.sv =====
 
 
+// ===== BEGIN FILE: cache_l2_v2.sv =====
+module cache_l2_v2 #(
+    // IS61LV25616 is 256K x 16 -> 262144 halfwords -> 131072 words (32-bit).
+    // Cache configuration
+    // 8 sets, 32-way associative, 32-bit line size 
+    // Total L2 memory = 8 * 32 * 4 bytes = 1024 bytes total.
+    parameter int NUM_SET = 8,
+    parameter int NUM_WAY = 32,
+    parameter int RD_WAIT_TIME = 5  // Wait cycles for SRAM propagation (1 cycle = 10ns with 10ns clock)
+) (
+    // Clock/reset.
+    input  logic         i_clk,            // System clock.
+    input  logic         i_reset,          // Async reset, active high.
+
+    // Request channel from upper level (CPU/L1 side).
+    input  logic         i_req_valid,      // 1 when request fields are valid.
+    input  logic         i_req_wr_en,      // 1=write, 0=read.
+    input  logic [31:0]  i_req_addr,       // Byte address from requester.
+    input  logic [31:0]  i_req_wdata,      // Write data for store.
+
+    // Response/flow-control toward upper level.
+    output logic [31:0]  o_resp_rdata,     // Returned read data (valid with o_resp_valid).
+    output logic         o_resp_valid,     // One-cycle response valid pulse in RESP.
+    output logic         o_stall,          // Back-pressure: 1 while request is being processed.
+    output logic         o_hit_debug,      // Debug pulse: request hit at tag check stage.
+    output logic         o_miss_debug,     // Debug pulse: request miss at tag check stage.
+
+    // Backing-memory interface (L2 miss path)
+    output logic         o_sram_enb,       // Transaction enable toward backing memory.
+    output logic [31:0]  o_sram_addr,      // Line address for writeback/allocate.
+    output logic         o_sram_wr_en,     // 1=writeback victim, 0=allocate/fetch line.
+    output logic [31:0]  o_sram_wdata,     // Victim line data during writeback.
+    input  logic [31:0]  i_sram_rdata,     // Refill line data returned from backing memory.
+    input  logic         i_sram_ready,
+
+    // External IS61LV25616 interface used as L2 data store.
+    output logic         o_l2sram_ce_n,    // Chip enable (active low).
+    output logic         o_l2sram_oe_n,    // Output enable (active low, read cycle).
+    output logic         o_l2sram_we_n,    // Write enable (active low, write cycle).
+    output logic         o_l2sram_lb_n,    // Lower byte enable (active low).
+    output logic         o_l2sram_ub_n,    // Upper byte enable (active low).
+    output logic [17:0]  o_l2sram_addr,    // Halfword address inside IS61.
+    inout  wire  [15:0]  io_l2sram_dq       // Shared data bus (tri-stated when not driving).
+);
+    localparam int IDX_W   = $clog2(NUM_SET);
+    localparam int WAY_W   = $clog2(NUM_WAY);
+    localparam int TAG_W   = 32 - 2 - IDX_W;
+
+    logic                  valid   [NUM_SET][NUM_WAY];
+    logic                  dirty   [NUM_SET][NUM_WAY];
+    logic [TAG_W-1:0]      tag_array [NUM_SET][NUM_WAY];
+    logic [WAY_W-1:0]      fifo_ptr[NUM_SET];
+
+    logic [31:0]           req_addr_reg;
+    logic [31:0]           req_wdata_reg;
+    logic                  req_wr_en_reg;
+
+    logic [IDX_W-1:0]      req_index;
+    logic [TAG_W-1:0]      req_tag;
+
+    logic [NUM_WAY-1:0]    way_hit;
+    logic                  hit;
+    logic [WAY_W-1:0]      hit_way;
+    logic [WAY_W-1:0]      victim_way;
+
+    logic                  hit_on_req_reg;
+    logic [WAY_W-1:0]      selected_way_reg;
+
+    logic [31:0]           line_data_reg;
+    logic [31:0]           write_word_reg;
+    logic [31:0]           refill_data_reg;
+    logic [31:0]           victim_data_reg;
+    logic [31:0]           victim_addr_reg;
+    logic [31:0]           resp_rdata_reg;
+    logic                  write_from_refill_reg;
+
+    logic [15:0]           l2sram_dq_out;
+    logic                  l2sram_dq_oe;
+    logic [15:0]           l2sram_dq_in;
+    logic                  rd_wait_hi_reg;
+
+    logic [$clog2(RD_WAIT_TIME+1)-1:0]  wait_counter;
+
+    // FSM stages:
+    // IDLE       : Wait for a new request, o_stall=0.
+    // LOOKUP  : Compare request tag against all ways in indexed set.
+    // RD_LO : Read lower 16-bit halfword from selected way.
+    // RD_HI : Read upper 16-bit halfword from selected way.
+    // RD_WAIT: Wait for SRAM propagation and capture current halfword.
+    // RD_END: Assemble 32-bit line and decide hit-read/hit-write/miss-writeback.
+    // WR_LO : Write lower 16-bit halfword into selected way.
+    // WR_HI : Write upper 16-bit halfword and commit metadata update.
+    // WRITEBACK  : Push dirty victim line to backing memory.
+    // ALLOCATE   : Request refill line from backing memory.
+    // REFILL: Prepare refill/merged-store data for SRAM write.
+    // RESP       : Return response to requester and release stall.
+    typedef enum logic [3:0] {
+        IDLE        = 4'd0,
+        LOOKUP   = 4'd1,
+        RD_LO  = 4'd2,
+        RD_HI  = 4'd3,
+        RD_WAIT = 4'd11,
+        RD_END = 4'd4,
+        WR_LO  = 4'd5,
+        WR_HI  = 4'd6,
+        WRITEBACK   = 4'd7,
+        ALLOCATE    = 4'd8,
+        REFILL = 4'd9,
+        RESP        = 4'd10
+    } state_t;
+
+    state_t state, next_state;
+
+    function automatic logic [17:0] l2sram_half_addr(
+        input logic [IDX_W-1:0] set_idx,
+        input logic [WAY_W-1:0] way_idx,
+        input logic             half_sel
+    );
+        begin
+            // Full-chip mapping: [17:5]=way(13b), [4:1]=set(4b), [0]=halfword select.
+            l2sram_half_addr = {way_idx, set_idx, half_sel};
+        end
+    endfunction
+
+    assign l2sram_dq_in = io_l2sram_dq;
+    assign io_l2sram_dq = l2sram_dq_oe ? l2sram_dq_out : 16'hzzzz;
+
+    assign req_index  = req_addr_reg[IDX_W+1:2];
+    assign req_tag    = req_addr_reg[31:IDX_W+2];
+    assign victim_way = fifo_ptr[req_index];
+
+    always @* begin
+        for (int w = 0; w < NUM_WAY; w = w + 1)
+            way_hit[w] = valid[req_index][w] && (tag_array[req_index][w] == req_tag);
+    end
+
+    assign hit = |way_hit;
+
+    always @* begin
+        hit_way = '0;
+        for (int w = 0; w < NUM_WAY; w = w + 1)
+            if (way_hit[w])
+                hit_way = w[WAY_W-1:0];
+    end
+
+    assign o_hit_debug  = (state == LOOKUP) && hit;
+    assign o_miss_debug = (state == LOOKUP) && !hit;
+
+    always @* begin
+        next_state = state;
+
+        case (state)
+            IDLE: begin
+                if (i_req_valid)
+                    next_state = LOOKUP;
+            end
+
+            LOOKUP: begin
+                if (hit)
+                    next_state = RD_LO;
+                else if (valid[req_index][victim_way] && dirty[req_index][victim_way])
+                    next_state = RD_LO;
+                else
+                    next_state = ALLOCATE;
+            end
+
+            RD_LO: begin
+                next_state = RD_WAIT;
+            end
+
+            RD_HI: begin
+                next_state = RD_WAIT;
+            end
+
+            RD_WAIT: begin
+                if (wait_counter == 0) begin
+                    if (rd_wait_hi_reg)
+                        next_state = RD_END;
+                    else
+                        next_state = RD_HI;
+                end else
+                    next_state = RD_WAIT;
+            end
+
+            RD_END: begin
+                if (hit_on_req_reg) begin
+                    if (req_wr_en_reg)
+                        next_state = WR_LO;
+                    else
+                        next_state = RESP;
+                end else begin
+                    next_state = WRITEBACK;
+                end
+            end
+
+            WR_LO: begin
+                next_state = WR_HI;
+            end
+
+            WR_HI: begin
+                next_state = RESP;
+            end
+
+            WRITEBACK: begin
+                if (i_sram_ready)
+                    next_state = ALLOCATE;
+            end
+
+            ALLOCATE: begin
+                if (i_sram_ready)
+                    next_state = REFILL;
+            end
+
+            REFILL: begin
+                next_state = WR_LO;
+            end
+
+            RESP: begin
+                next_state = IDLE;
+            end
+
+            default: begin
+                next_state = IDLE;
+            end
+        endcase
+    end
+
+    always_ff @(posedge i_clk or posedge i_reset) begin
+        if (i_reset) begin
+            state <= IDLE;
+            req_addr_reg <= 32'b0;
+            req_wdata_reg <= 32'b0;
+            req_wr_en_reg <= 1'b0;
+
+            hit_on_req_reg <= 1'b0;
+            selected_way_reg <= '0;
+
+            line_data_reg <= 32'b0;
+            write_word_reg <= 32'b0;
+            refill_data_reg <= 32'b0;
+            victim_data_reg <= 32'b0;
+            victim_addr_reg <= 32'b0;
+            resp_rdata_reg <= 32'b0;
+            write_from_refill_reg <= 1'b0;
+            wait_counter <= '0;
+            rd_wait_hi_reg <= 1'b0;
+
+            for (int s = 0; s < NUM_SET; s = s + 1) begin
+                fifo_ptr[s] <= '0;
+                for (int w = 0; w < NUM_WAY; w = w + 1) begin
+                    valid[s][w] <= 1'b0;
+                    dirty[s][w] <= 1'b0;
+                    tag_array[s][w] <= '0;
+                end
+            end
+        end else begin
+            state <= next_state;
+
+            if (state == IDLE && i_req_valid) begin
+                req_addr_reg <= i_req_addr;
+                req_wdata_reg <= i_req_wdata;
+                req_wr_en_reg <= i_req_wr_en;
+            end
+
+            if (state == LOOKUP) begin
+                hit_on_req_reg <= hit;
+
+                if (hit) begin
+                    selected_way_reg <= hit_way;
+                end else begin
+                    selected_way_reg <= victim_way;
+                    victim_addr_reg <= {tag_array[req_index][victim_way], req_index, 2'b00};
+                end
+            end
+
+            if (state == RD_WAIT && wait_counter == 0) begin
+                if (rd_wait_hi_reg)
+                    line_data_reg[31:16] <= l2sram_dq_in;
+                else
+                    line_data_reg[15:0] <= l2sram_dq_in;
+            end
+
+            if (state == RD_LO && next_state == RD_WAIT) begin
+                wait_counter <= RD_WAIT_TIME;
+                rd_wait_hi_reg <= 1'b0;
+            end else if (state == RD_HI && next_state == RD_WAIT) begin
+                wait_counter <= RD_WAIT_TIME;
+                rd_wait_hi_reg <= 1'b1;
+            end else if (state == RD_WAIT && wait_counter > 0) begin
+                wait_counter <= wait_counter - 1'b1;
+            end
+
+            if (state == RD_END) begin
+                if (hit_on_req_reg) begin
+                    if (req_wr_en_reg) begin
+                        write_word_reg <= req_wdata_reg;
+                        write_from_refill_reg <= 1'b0;
+                    end else begin
+                        resp_rdata_reg <= line_data_reg;
+                    end
+                end else begin
+                    victim_data_reg <= line_data_reg;
+                end
+            end
+
+            if (state == ALLOCATE && i_sram_ready) begin
+                refill_data_reg <= i_sram_rdata;
+                write_word_reg <= req_wr_en_reg
+                    ? req_wdata_reg
+                    : i_sram_rdata;
+                write_from_refill_reg <= 1'b1;
+            end
+
+            if (state == WR_HI) begin
+                if (write_from_refill_reg) begin
+                    tag_array[req_index][selected_way_reg] <= req_tag;
+                    valid[req_index][selected_way_reg] <= 1'b1;
+                    dirty[req_index][selected_way_reg] <= req_wr_en_reg;
+                    fifo_ptr[req_index] <= fifo_ptr[req_index] + 1'b1;
+
+                    if (!req_wr_en_reg)
+                        resp_rdata_reg <= refill_data_reg;
+                end else begin
+                    dirty[req_index][selected_way_reg] <= 1'b1;
+                end
+            end
+        end
+    end
+
+// synopsys translate_off
+    always @(posedge i_clk) begin
+        if (!i_reset) begin
+            if (state == LOOKUP) begin
+                if (hit) begin
+                    $display("[L2 HIT ] t=%0t addr=0x%08h set=%0d way=%0d %s req_wdata=0x%08h",
+                        $time, req_addr_reg, req_index, hit_way,
+                        req_wr_en_reg ? "WRITE" : "READ",
+                        req_wdata_reg);
+                end else begin
+                    $display("[L2 MISS] t=%0t addr=0x%08h set=%0d victim_way=%0d %s req_wdata=0x%08h -> evict_addr=0x%08h",
+                        $time, req_addr_reg, req_index, victim_way,
+                        req_wr_en_reg ? "WRITE" : "READ",
+                        req_wdata_reg,
+                        {tag_array[req_index][victim_way], req_index, 2'b00});
+                end
+            end
+
+            if (state == RD_END) begin
+                if (hit_on_req_reg) begin
+                    if (req_wr_en_reg) begin
+                        $display("[L2 HIT-DATA ] t=%0t addr=0x%08h WRITE old_line=0x%08h new_line=0x%08h",
+                            $time, req_addr_reg, line_data_reg, req_wdata_reg);
+                    end else begin
+                        $display("[L2 HIT-DATA ] t=%0t addr=0x%08h READ rdata=0x%08h",
+                            $time, req_addr_reg, line_data_reg);
+                    end
+                end else begin
+                    $display("[L2 VICTIM  ] t=%0t evict_addr=0x%08h victim_data=0x%08h",
+                        $time, victim_addr_reg, line_data_reg);
+                end
+            end
+
+            if (state == ALLOCATE && i_sram_ready) begin
+                $display("[L2 REFILL ] t=%0t addr=0x%08h from_main=0x%08h req_wdata=0x%08h final_line=0x%08h",
+                    $time, req_addr_reg, i_sram_rdata, req_wdata_reg,
+                    (req_wr_en_reg ? req_wdata_reg : i_sram_rdata));
+            end
+        end
+    end
+// synopsys translate_on
+
+    always @* begin
+        // Backing-memory defaults.
+        o_sram_enb   = 1'b0;
+        o_sram_addr  = 32'b0;
+        o_sram_wr_en = 1'b0;
+        o_sram_wdata = 32'b0;
+
+        // Response defaults.
+        o_stall      = 1'b1;
+        o_resp_valid = 1'b0;
+        o_resp_rdata = 32'b0;
+
+        // External IS61 defaults: deselect chip.
+        o_l2sram_ce_n = 1'b1;
+        o_l2sram_oe_n = 1'b1;
+        o_l2sram_we_n = 1'b1;
+        o_l2sram_lb_n = 1'b1;
+        o_l2sram_ub_n = 1'b1;
+        o_l2sram_addr = 18'b0;
+        l2sram_dq_oe  = 1'b0;
+        l2sram_dq_out = 16'b0;
+
+        case (state)
+            IDLE: begin
+                o_stall = 1'b0;
+            end
+
+            RD_LO: begin
+                o_l2sram_ce_n = 1'b0;
+                o_l2sram_oe_n = 1'b0;
+                o_l2sram_we_n = 1'b1;
+                o_l2sram_lb_n = 1'b0;
+                o_l2sram_ub_n = 1'b0;
+                o_l2sram_addr = l2sram_half_addr(req_index, selected_way_reg, 1'b0);
+            end
+
+            RD_HI: begin
+                o_l2sram_ce_n = 1'b0;
+                o_l2sram_oe_n = 1'b0;
+                o_l2sram_we_n = 1'b1;
+                o_l2sram_lb_n = 1'b0;
+                o_l2sram_ub_n = 1'b0;
+                o_l2sram_addr = l2sram_half_addr(req_index, selected_way_reg, 1'b1);
+            end
+
+            RD_WAIT: begin
+                o_l2sram_ce_n = 1'b0;
+                o_l2sram_oe_n = 1'b0;
+                o_l2sram_we_n = 1'b1;
+                o_l2sram_lb_n = 1'b0;
+                o_l2sram_ub_n = 1'b0;
+                o_l2sram_addr = l2sram_half_addr(req_index, selected_way_reg, rd_wait_hi_reg);
+            end
+
+            WR_LO: begin
+                o_l2sram_ce_n = 1'b0;
+                o_l2sram_oe_n = 1'b1;
+                o_l2sram_we_n = 1'b0;
+                o_l2sram_lb_n = 1'b0;
+                o_l2sram_ub_n = 1'b0;
+                o_l2sram_addr = l2sram_half_addr(req_index, selected_way_reg, 1'b0);
+                l2sram_dq_oe  = 1'b1;
+                l2sram_dq_out = write_word_reg[15:0];
+            end
+
+            WR_HI: begin
+                o_l2sram_ce_n = 1'b0;
+                o_l2sram_oe_n = 1'b1;
+                o_l2sram_we_n = 1'b0;
+                o_l2sram_lb_n = 1'b0;
+                o_l2sram_ub_n = 1'b0;
+                o_l2sram_addr = l2sram_half_addr(req_index, selected_way_reg, 1'b1);
+                l2sram_dq_oe  = 1'b1;
+                l2sram_dq_out = write_word_reg[31:16];
+            end
+
+            WRITEBACK: begin
+                o_sram_enb   = 1'b1;
+                o_sram_addr  = victim_addr_reg;
+                o_sram_wr_en = 1'b1;
+                o_sram_wdata = victim_data_reg;
+            end
+
+            ALLOCATE: begin
+                o_sram_enb   = 1'b1;
+                o_sram_addr  = req_addr_reg;
+                o_sram_wr_en = 1'b0;
+            end
+
+            RESP: begin
+                o_stall      = 1'b0;
+                o_resp_valid = 1'b1;
+                if (!req_wr_en_reg)
+                    o_resp_rdata = resp_rdata_reg;
+            end
+
+            default: begin
+            end
+        endcase
+    end
+
+endmodule
+// ===== END FILE: cache_l2_v2.sv =====
+
+
+// ===== BEGIN FILE: cache_v2.sv =====
+module cache_v2 (
+    input  logic         i_clk,
+    input  logic         i_reset,
+
+    input  logic         i_mem_access,
+    input  logic         i_wr_en,
+    input  logic  [3:0]  i_byte_mask,
+    input  logic [31:0]  i_addr,
+    input  logic [31:0]  i_wdata,
+    output logic [31:0]  o_rdata,
+    output logic         o_hit_debug,
+    output logic         o_miss_debug,
+    output logic         o_stall,
+    output logic         o_cache_done,
+
+    output logic         o_cache_l2_enb,
+    output logic [31:0]  o_cache_l2_addr,
+    output logic         o_cache_l2_wr_en,
+    output logic [31:0]  o_cache_l2_wdata,
+    input  logic [31:0]  i_cache_l2_rdata,
+    input  logic         i_cache_l2_ready
+);
+    // Cache configuration
+    // 4 sets, 16-way associative, 32-bit line size
+    // Total cache size = 4 sets * 16 ways * 4 bytes = 256 bytes
+    localparam int NUM_SET = 4;
+    localparam int NUM_WAY = 16;
+    localparam int INDEX_BITS = $clog2(NUM_SET);
+    localparam int TAG_BITS = 32 - INDEX_BITS - 2;
+
+    logic [31:0] req_addr_reg;
+    logic [31:0] req_wdata_reg;
+    logic        req_wr_en_reg;
+    logic [3:0]  req_byte_mask_reg;
+
+    logic [INDEX_BITS-1:0] index;
+    logic [TAG_BITS-1:0] tag;
+    assign index = req_addr_reg[2 +: INDEX_BITS];
+    assign tag   = req_addr_reg[31 -: TAG_BITS];
+
+    logic valid   [NUM_SET][NUM_WAY];
+    logic dirty   [NUM_SET][NUM_WAY];
+    logic [TAG_BITS-1:0] tag_array [NUM_SET][NUM_WAY];
+    logic [31:0] data_array[NUM_SET][NUM_WAY];
+    logic [$clog2(NUM_WAY)-1:0] fifo_ptr[NUM_SET];
+
+    logic stall;
+
+    logic [NUM_WAY-1:0] way_hit;
+    logic hit;
+    logic [$clog2(NUM_WAY)-1:0] hit_way;
+
+    logic [31:0]  miss_addr_reg;
+    logic [31:0]  miss_wdata_reg;
+    logic         miss_wr_en_reg;
+    logic [3:0]   miss_byte_mask_reg;
+    logic [$clog2(NUM_WAY)-1:0] victim_way_reg;
+    logic [INDEX_BITS-1:0] miss_index_reg;
+    logic [TAG_BITS-1:0]  miss_tag_reg;
+    logic [31:0]  victim_addr_reg;
+    logic [INDEX_BITS-1:0] hit_index_reg;
+    logic [$clog2(NUM_WAY)-1:0] hit_way_reg;
+    logic         output_from_hit_reg;
+    logic         allocate_wait_reg;
+    logic [31:0]  refill_data_reg;
+
+    logic [$clog2(NUM_WAY)-1:0] victim_way;
+    assign victim_way = fifo_ptr[index];
+
+    typedef enum logic [2:0] {
+        IDLE      = 3'b000,
+        LOOKUP    = 3'b001,
+        WRITEBACK = 3'b010,
+        ALLOCATE  = 3'b011,
+        REFILL    = 3'b100,
+        RESPONE   = 3'b101
+    } state_t;
+
+    state_t current_state, next_state;
+
+    function automatic logic [31:0] write_with_mask(
+        input logic [31:0] old_data,
+        input logic [31:0] new_data,
+        input logic [3:0]  byte_mask
+    );
+        begin
+            case (byte_mask)
+                4'b0001: write_with_mask = {old_data[31:8],  new_data[7:0]};
+                4'b0010: write_with_mask = {old_data[31:16], new_data[15:8],  old_data[7:0]};
+                4'b0100: write_with_mask = {old_data[31:24], new_data[23:16], old_data[15:0]};
+                4'b1000: write_with_mask = {new_data[31:24], old_data[23:0]};
+                4'b0011: write_with_mask = {old_data[31:16], new_data[15:0]};
+                4'b1100: write_with_mask = {new_data[31:16], old_data[15:0]};
+                4'b1111: write_with_mask = new_data;
+                default: write_with_mask = old_data;
+            endcase
+        end
+    endfunction
+
+    always_comb begin
+        for (int w = 0; w < NUM_WAY; w++)
+            way_hit[w] = valid[index][w] && (tag_array[index][w] == tag);
+    end
+
+    assign hit = |way_hit;
+
+    always_comb begin
+        hit_way = '0;
+        for (int w = 0; w < NUM_WAY; w++)
+            if (way_hit[w]) hit_way = w;
+    end
+
+    assign o_hit_debug  = (current_state == LOOKUP) && hit;
+    assign o_miss_debug = (current_state == LOOKUP) && !hit;
+    assign o_stall = stall;
+
+    always_comb begin
+        next_state = current_state;
+        case (current_state)
+            IDLE: begin
+                if (i_mem_access)
+                    next_state = LOOKUP;
+            end
+
+            LOOKUP: begin
+                if (hit)
+                    next_state = RESPONE;
+                else if (valid[index][victim_way] && dirty[index][victim_way])
+                    next_state = WRITEBACK;
+                else
+                    next_state = ALLOCATE;
+            end
+
+            WRITEBACK: begin
+                if (i_cache_l2_ready)
+                    next_state = ALLOCATE;
+            end
+
+            ALLOCATE: begin
+                // Ignore stale ready pulse from prior WRITEBACK response.
+                if (allocate_wait_reg && i_cache_l2_ready)
+                    next_state = REFILL;
+            end
+
+            REFILL: begin
+                next_state = RESPONE;
+            end
+
+            RESPONE: begin
+                next_state = IDLE;
+            end
+
+            default: begin
+                next_state = IDLE;
+            end
+        endcase
+    end
+
+    always_ff @(posedge i_clk or posedge i_reset) begin
+        if (i_reset) begin
+            current_state <= IDLE;
+            req_addr_reg <= 32'b0;
+            req_wdata_reg <= 32'b0;
+            req_wr_en_reg <= 1'b0;
+            req_byte_mask_reg <= 4'b0;
+
+            miss_addr_reg <= 32'b0;
+            miss_wdata_reg <= 32'b0;
+            miss_wr_en_reg <= 1'b0;
+            miss_byte_mask_reg <= 4'b0;
+            victim_way_reg <= '0;
+            miss_index_reg <= '0;
+            miss_tag_reg <= '0;
+            victim_addr_reg <= 32'b0;
+
+            hit_index_reg <= '0;
+            hit_way_reg <= '0;
+            output_from_hit_reg <= 1'b0;
+            allocate_wait_reg <= 1'b0;
+            refill_data_reg <= 32'b0;
+
+            for (int s = 0; s < NUM_SET; s++) begin
+                fifo_ptr[s] <= '0;
+                for (int w = 0; w < NUM_WAY; w++) begin
+                    valid[s][w] <= 1'b0;
+                    dirty[s][w] <= 1'b0;
+                    tag_array[s][w] <= '0;
+                    data_array[s][w] <= 32'b0;
+                end
+            end
+        end else begin
+            current_state <= next_state;
+
+            if (current_state != ALLOCATE)
+                allocate_wait_reg <= 1'b0;
+            else if (!allocate_wait_reg)
+                allocate_wait_reg <= 1'b1;
+
+            if (current_state == IDLE && i_mem_access) begin
+                req_addr_reg <= i_addr;
+                req_wdata_reg <= i_wdata;
+                req_wr_en_reg <= i_wr_en;
+                req_byte_mask_reg <= i_byte_mask;
+            end
+
+            if (current_state == LOOKUP && hit) begin
+                hit_index_reg <= index;
+                hit_way_reg <= hit_way;
+                output_from_hit_reg <= 1'b1;
+            end
+
+            if (current_state == LOOKUP && !hit) begin
+                miss_addr_reg <= req_addr_reg;
+                miss_wdata_reg <= req_wdata_reg;
+                miss_wr_en_reg <= req_wr_en_reg;
+                miss_byte_mask_reg <= req_byte_mask_reg;
+                victim_way_reg <= victim_way;
+                miss_index_reg <= index;
+                miss_tag_reg <= tag;
+                victim_addr_reg <= {tag_array[index][victim_way], index, 2'b00};
+                output_from_hit_reg <= 1'b0;
+            end
+
+            // Capture refill data when ready signal is asserted
+            if ((current_state == WRITEBACK || current_state == ALLOCATE) && i_cache_l2_ready) begin
+                refill_data_reg <= i_cache_l2_rdata;
+            end
+
+            if (current_state == REFILL) begin
+                tag_array[miss_index_reg][victim_way_reg] <= miss_tag_reg;
+                valid[miss_index_reg][victim_way_reg] <= 1'b1;
+
+                if (miss_wr_en_reg) begin
+                    data_array[miss_index_reg][victim_way_reg] <= write_with_mask(refill_data_reg, miss_wdata_reg, miss_byte_mask_reg);
+                    dirty[miss_index_reg][victim_way_reg] <= 1'b1;
+                end else begin
+                    data_array[miss_index_reg][victim_way_reg] <= refill_data_reg;
+                    dirty[miss_index_reg][victim_way_reg] <= 1'b0;
+                end
+
+                fifo_ptr[miss_index_reg] <= fifo_ptr[miss_index_reg] + 1'b1;
+            end
+
+            if (current_state == LOOKUP && hit && req_wr_en_reg) begin
+                data_array[index][hit_way] <= write_with_mask(data_array[index][hit_way], req_wdata_reg, req_byte_mask_reg);
+                dirty[index][hit_way] <= 1'b1;
+            end
+        end
+    end
+
+
+     always_comb begin
+        /*
+        stall = 1'b0;
+        o_cache_l2_enb = 1'b0;
+        o_cache_l2_addr = 32'b0;
+        o_cache_l2_wr_en = 1'b0;
+        o_cache_l2_wdata = 32'b0;
+        o_cache_done = 1'b0;
+        o_rdata = 32'b0;
+        */
+        case (current_state)
+            IDLE: begin
+                stall = 1'b0;
+                o_cache_l2_enb = 1'b0;
+                o_cache_l2_addr = 32'b0;
+                o_cache_l2_wr_en = 1'b0;
+                o_cache_l2_wdata = 32'b0;
+                o_cache_done = 1'b0;
+                o_rdata = data_array[index][hit_way];
+            end
+
+            LOOKUP: begin
+                stall = 1'b1;
+                o_cache_l2_enb = 1'b0;
+                o_cache_l2_addr = 32'b0;
+                o_cache_l2_wr_en = 1'b0;
+                o_cache_l2_wdata = 32'b0;
+                o_cache_done = 1'b0;
+                o_rdata = data_array[index][hit_way];
+            end
+
+            WRITEBACK: begin
+                stall = 1'b1;
+                o_cache_l2_enb = 1'b1;
+                o_cache_l2_addr = victim_addr_reg;
+                o_cache_l2_wr_en = 1'b1;
+                o_cache_l2_wdata = data_array[miss_index_reg][victim_way_reg];
+                o_cache_done = 1'b0;
+                o_rdata = 0;
+            end
+
+            ALLOCATE: begin
+                stall = 1'b1;
+                o_cache_l2_enb = 1'b1;
+                o_cache_l2_addr = miss_addr_reg;
+                o_cache_l2_wr_en = 1'b0;
+                o_cache_l2_wdata = 32'b0;
+                o_cache_done = 1'b0;
+                o_rdata = data_array[index][hit_way];
+            end
+
+            REFILL: begin
+                stall = 1'b1;
+                o_cache_l2_enb = 1'b0;
+                o_cache_l2_addr = 32'b0;
+                o_cache_l2_wr_en = 1'b0;
+                o_cache_l2_wdata = 32'b0;
+                o_cache_done = 1'b0;
+                o_rdata = data_array[index][hit_way];
+            end
+
+            RESPONE: begin
+                stall = 1'b1;
+                o_cache_done = 1'b1;
+					 o_cache_l2_enb = 1'b0;
+					 o_cache_l2_addr = 32'b0;
+					 o_cache_l2_wdata = 32'b0;
+					 o_cache_l2_wr_en = 1'b0;
+                if (output_from_hit_reg)
+                    o_rdata = data_array[hit_index_reg][hit_way_reg];
+                else
+                    o_rdata = data_array[miss_index_reg][victim_way_reg];
+            end
+
+            default: begin
+            end
+        endcase
+    end
+
+    // Simulation-only debug output (not synthesized)
+`ifndef SYNTHESIS
+    always @(posedge i_clk) begin
+        if (!i_reset) begin
+            if (current_state == LOOKUP && way_hit[hit_way]) begin
+                $display("[L1 HIT ] t=%0t addr=0x%08h set=%0d way=%0d %s req_wdata=0x%08h line_data=0x%08h",
+                    $time, req_addr_reg, index, hit_way,
+                    req_wr_en_reg ? "WRITE" : "READ",
+                    req_wdata_reg, data_array[index][hit_way]);
+            end
+            
+            if (current_state == LOOKUP && !hit) begin
+                $display("[L1 MISS] t=%0t addr=0x%08h set=%0d victim_way=%0d %s req_wdata=0x%08h -> evict_addr=0x%08h evict_data=0x%08h",
+                    $time, req_addr_reg, index, victim_way,
+                    req_wr_en_reg ? "WRITE" : "READ",
+                    req_wdata_reg,
+                    {tag_array[index][victim_way], index, 2'b00},
+                    data_array[index][victim_way]);
+                if (valid[index][victim_way]) begin
+                    $display("[L1 REPL] t=%0t set=%0d way=%0d dirty=%0b evict_addr=0x%08h evict_data=0x%08h",
+                        $time, index, victim_way, dirty[index][victim_way],
+                        {tag_array[index][victim_way], index, 2'b00},
+                        data_array[index][victim_way]);
+                end
+            end
+            
+            if (current_state == REFILL) begin
+                if (miss_wr_en_reg) begin
+                    $display("[L1 REFILL] t=%0t addr=0x%08h set=%0d way=%0d WRITE refill=0x%08h req_wdata=0x%08h final_line=0x%08h",
+                        $time, miss_addr_reg, miss_index_reg, victim_way_reg,
+                        refill_data_reg, miss_wdata_reg,
+                        write_with_mask(refill_data_reg, miss_wdata_reg, miss_byte_mask_reg));
+                end else begin
+                    $display("[L1 REFILL] t=%0t addr=0x%08h set=%0d way=%0d READ refill=0x%08h",
+                        $time, miss_addr_reg, miss_index_reg, victim_way_reg, refill_data_reg);
+                end
+            end
+        end
+    end
+`endif
+
+endmodule
+// ===== END FILE: cache_v2.sv =====
+
+
 // ===== BEGIN FILE: control_unit_new.sv =====
 `ifndef CONTROL_UNIT
 `define CONTROL_UNIT
@@ -1092,7 +1950,7 @@ module data_transfer(
     logic [7:0]  selected_byte;
     logic [15:0] selected_half;
 
-    always_comb begin
+    always @ (*) begin
         case (i_byte_offset)
             2'b00: selected_byte = i_ld_data[7:0];
             2'b01: selected_byte = i_ld_data[15:8];
@@ -1101,14 +1959,14 @@ module data_transfer(
         endcase
     end
 
-    always_comb begin
+    always @ (*) begin
         if (i_byte_offset[1] == 1'b0)
             selected_half = i_ld_data[15:0];
         else
             selected_half = i_ld_data[31:16];
     end
 
-    always_comb begin
+    always @ (*) begin
         case (i_load_type)
             LB:  o_ld_result = {{24{selected_byte[7]}}, selected_byte};
             LH:  o_ld_result = {{16{selected_half[15]}}, selected_half};
@@ -1204,12 +2062,12 @@ module decode_cycle(
     logic ctrl_reg, ctrl;
 
     //For decode forwarding
-    logic [4:0] rd_addr_execute;
+    //logic [4:0] rd_addr_execute;
     logic [4:0] rs1_addr_decode;
     logic [4:0] rs2_addr_decode;
     logic sel_forward_decode;
 
-    assign rd_addr_execute = o_decode_inst_ex[11:7];
+    //assign rd_addr_execute = o_decode_inst_ex[11:7];
     assign rs1_addr_decode = i_decode_inst[19:15];
     assign rs2_addr_decode = i_decode_inst[24:20];
 
@@ -1650,11 +2508,10 @@ module forward(
 //logic [6:0] opcode_EX;
     logic [4:0] rs1_addr_execute; 
     logic [4:0] rs2_addr_execute;
-    logic [6:0] opcode_fwd;
+    
     // TÃ¡ch rs1 vÃ  rs2 tá»« instruction 
     assign rs1_addr_execute = i_fwd_inst_execute[19:15];
     assign rs2_addr_execute = i_fwd_inst_execute[24:20];
-    assign opcode_fwd       = i_fwd_inst_execute[6:0];
 
     always @ (*) begin
             //---------- Forward operand a ALU -----------------------
@@ -1713,7 +2570,7 @@ module hazard_detection(
     // TÃ¡ch rd tá»« instruction á»Ÿ EX stage
     assign rd_addr_execute = i_hazard_inst_execute[11:7];
 
-    always_comb begin
+    always @ (*) begin
         // Náº¿u lá»‡nh á»Ÿ EX lÃ  load (WBSel = 2'b00) vÃ  ghi vÃ o thanh ghi (i_hazard_rd_wren_execute)
         // vÃ  rd_addr_execute khá»›p vá»›i i_hazard_rs1_addr_decode hoáº·c i_hazard_rs2_addr_decode cá»§a lá»‡nh hiá»‡n táº¡i á»Ÿ Decode
 			if ((i_hazard_wb_sel_execute == 2'b00 && i_hazard_rd_wren_execute == 1'b1) && (rd_addr_execute != 5'd0) && (rd_addr_execute == i_hazard_rs1_addr_decode || rd_addr_execute == i_hazard_rs2_addr_decode)) begin
@@ -1788,7 +2645,8 @@ module inst_memory (
 
   logic [31:0] imem [0:2048];
   initial begin
-    $readmemh("D:/HCMUT/Year_2025_2026/252/LVTN/milestone_3_cache/00_src/isa_4b_ms3.hex", imem);
+    //$readmemh("D:/HCMUT/Year_2025_2026/252/LVTN/milestone_3_cache/00_src/isa_4b_ms3.hex", imem);
+    $readmemh("D:/HCMUT/Year_2025_2026/252/LVTN/milestone_3_cache/00_src/Stress_RW.hex", imem);
     //$readmemh("D:/HCMUT/Year_2025_2026/252/LVTN/milestone_3_cache/00_src/Test_Store_Type.dump", imem);
     //D:\HCMUT\Year_2025_2026\252\LVTN\milestone_3_cache\00_src\isa_4b_ms3.hex
   end
@@ -1830,6 +2688,9 @@ endmodule
 // Author: Nhu Bui
 `ifndef LSU
 `define LSU
+//`include "mux3_1.sv"
+//`include "cache.sv"
+//`include "cache_l2.sv"
 /*------------------------------------------------------------*/
 
 module lsu_new (
@@ -1865,7 +2726,29 @@ module lsu_new (
     // Debug: bubble up cache hit
     output logic        o_cache_hit_debug,
     // Debug: bubble up cache miss
-    output logic        o_cache_miss_debug
+    output logic        o_cache_miss_debug,
+
+    // L2 SRAM physical pins (bubble up to top-level pipeline)
+    output logic        o_l2sram_ce_n,
+    output logic        o_l2sram_oe_n,
+    output logic        o_l2sram_we_n,
+    output logic        o_l2sram_lb_n,
+    output logic        o_l2sram_ub_n,
+    output logic [17:0] o_l2sram_addr,
+    inout  wire  [15:0] io_l2sram_dq,
+
+    // SDRAM physical interface pins (unused in SRAM-backed simulation path)
+    output logic        o_dram_clk,
+    output logic        o_dram_cke,
+    output logic        o_dram_cs_n,
+    output logic        o_dram_ras_n,
+    output logic        o_dram_cas_n,
+    output logic        o_dram_we_n,
+    output logic [1:0]  o_dram_ba,
+    output logic [11:0] o_dram_addr,
+    output logic        o_dram_ldqm,
+    output logic        o_dram_udqm,
+    inout  wire  [15:0] io_dram_dq
   );
 
   /*---------------------------------*/
@@ -1883,10 +2766,10 @@ module lsu_new (
   logic [31:0] input_bf_tmp;
   logic [31:0] output_bf_tmp;
   logic [31:0] data_mem_tmp;
-  logic [2:0]  slt_sl_tmp;
   logic [31:0] ld_cache_data;
   logic [31:0] st_cache_data;
   logic [3:0]  byte_mask;
+
 /*-------- Input buffer --------*/
   logic [31:0] INPUT;
   always_ff @(posedge i_clk) begin // ghi Ä‘á»“ng bá»™
@@ -1898,7 +2781,6 @@ module lsu_new (
  always_ff @ (posedge i_clk) begin
     data_out_1 <= input_bf_tmp;
     data_out_2 <= output_bf_tmp;
-    slt_sl_tmp <= slt_sl; 
  end
 
 /*-------- Cache + SRAM (replaces data mem) --------*/
@@ -1927,12 +2809,6 @@ module lsu_new (
     .byte_mask   (byte_mask)
   );
 
-  mask_load u_mask_load (
-    .slt_sl        (slt_sl_tmp),
-    .ld_data       (ld_cache_data),
-    .addr_sp       (i_lsu_addr[1:0]),
-    .data_after_load (data_out_3)
-  );
   mask_store u_mask_store (
     .slt_sl        (slt_sl),
     .st_data       (i_st_data),
@@ -1940,7 +2816,7 @@ module lsu_new (
     .data_to_cache (st_cache_data)
   );
   // Instantiate Cache; memory access only when demux selects data memory
-  cache u_cache (
+  cache_v2 u_cache (
     .i_clk         (i_clk),
     .i_reset       (i_reset),
     .i_mem_access  (en_datamem && i_mem_access),
@@ -1948,44 +2824,50 @@ module lsu_new (
     .i_addr        (i_lsu_addr),
     .i_byte_mask   (byte_mask),
     .i_wdata       (st_cache_data),
-    .o_rdata       (ld_cache_data /*data_out_3*/),
+    .o_rdata       (data_out_3),
     .o_hit_debug   (cache_hit_dbg),
     .o_miss_debug  (cache_miss_dbg),
     .o_stall       (o_cache_stall),
     .o_cache_done  (o_cache_done),
-    // SRAM interface
-    .o_sram_enb    (l1_l2_req_valid),
-    .o_sram_addr   (l1_l2_req_addr),
-    .o_sram_wr_en  (l1_l2_req_wr_en),
-    .o_sram_wdata  (l1_l2_req_wdata),
-    .i_sram_rdata  (l2_l1_resp_rdata),
-    .i_sram_ready  (l2_l1_resp_valid)
+    // Cache L2 interface
+    .o_cache_l2_enb    (l1_l2_req_valid),
+    .o_cache_l2_addr   (l1_l2_req_addr),
+    .o_cache_l2_wr_en  (l1_l2_req_wr_en),
+    .o_cache_l2_wdata  (l1_l2_req_wdata),
+    .i_cache_l2_rdata  (l2_l1_resp_rdata),
+    .i_cache_l2_ready  (l2_l1_resp_valid)
   );
 
-  // L2 cache serves L1 misses/hit-under-L2, and accesses SRAM on L2 miss
-  cache_l2 u_cache_l2 (
-    .i_clk          (i_clk),
-    .i_reset        (i_reset),
-    .i_req_valid    (l1_l2_req_valid),
-    .i_req_wr_en    (l1_l2_req_wr_en),
-    .i_req_byte_mask(l1_l2_req_wr_en ? 4'b1111 : 4'b0000),
-    .i_req_addr     (l1_l2_req_addr),
-    .i_req_wdata    (l1_l2_req_wdata),
-    .o_resp_rdata   (l2_l1_resp_rdata),
-    .o_resp_valid   (l2_l1_resp_valid),
-    .o_stall        (),
-    .o_hit_debug    (),
-    .o_miss_debug   (),
-    .o_sram_enb     (l2_sram_enb),
-    .o_sram_addr    (l2_sram_addr),
-    .o_sram_wr_en   (l2_sram_wr_en),
-    .o_sram_wdata   (l2_sram_wdata),
-    .i_sram_rdata   (sram_rdata),
-    .i_sram_ready   (sram_ready)
+  // L2 cache (IS61LV25616 as data array) serves L1 misses, accesses backing SRAM on L2 miss
+  cache_l2_v2 u_cache_l2 (
+    .i_clk           (i_clk),
+    .i_reset         (i_reset),
+    .i_req_valid     (l1_l2_req_valid),
+    .i_req_wr_en     (l1_l2_req_wr_en),
+    .i_req_addr      (l1_l2_req_addr),
+    .i_req_wdata     (l1_l2_req_wdata),
+    .o_resp_rdata    (l2_l1_resp_rdata),
+    .o_resp_valid    (l2_l1_resp_valid),
+    .o_stall         (),
+    .o_hit_debug     (),
+    .o_miss_debug    (),
+    .o_sram_enb      (l2_sram_enb),
+    .o_sram_addr     (l2_sram_addr),
+    .o_sram_wr_en    (l2_sram_wr_en),
+    .o_sram_wdata    (l2_sram_wdata),
+    .i_sram_rdata    (sram_rdata),
+    .i_sram_ready    (sram_ready),
+    // IS61LV25616 physical SRAM data array
+    .o_l2sram_ce_n   (o_l2sram_ce_n),
+    .o_l2sram_oe_n   (o_l2sram_oe_n),
+    .o_l2sram_we_n   (o_l2sram_we_n),
+    .o_l2sram_lb_n   (o_l2sram_lb_n),
+    .o_l2sram_ub_n   (o_l2sram_ub_n),
+    .o_l2sram_addr   (o_l2sram_addr),
+    .io_l2sram_dq    (io_l2sram_dq)
   );
 
-  // SRAM is now behind L2
-  sram u_sram (
+  sram u_sram(
     .i_clk      (i_clk),
     .i_reset    (i_reset),
     .i_sram_enb (l2_sram_enb),
@@ -1995,7 +2877,17 @@ module lsu_new (
     .o_rdata    (sram_rdata),
     .o_ready    (sram_ready)
   );
-
+  // SDRAM interface is not used when backing store is internal SRAM model.
+  assign o_dram_clk  = 1'b0;
+  assign o_dram_cke  = 1'b0;
+  assign o_dram_cs_n = 1'b1;
+  assign o_dram_ras_n= 1'b1;
+  assign o_dram_cas_n= 1'b1;
+  assign o_dram_we_n = 1'b1;
+  assign o_dram_ba   = 2'b00;
+  assign o_dram_addr = 12'b0;
+  assign o_dram_ldqm = 1'b1;
+  assign o_dram_udqm = 1'b1;
 /*-------- DEMUX --------*/
   demux_sel_mem demux_1 (
     .i_lsu_addr(i_lsu_addr[31:0]),
@@ -2012,7 +2904,7 @@ module lsu_new (
     .st_en_2_i     (i_lsu_wren),
     .i_clk         (i_clk), 
     .i_reset       (i_reset),
-    .data_out_2_o  (output_bf_tmp /*data_out_2*/), 
+    .data_out_2_o  (output_bf_tmp), 
     .io_lcd_o      (o_io_lcd), 
     .io_ledg_o     (o_io_ledg), 
     .io_ledr_o     (o_io_ledr), 
@@ -2050,7 +2942,7 @@ module mask_create (
 );
  localparam SW = 3'b010, SB = 3'b000, SH = 3'b001;
 
-  always_comb begin
+  always @ (*) begin
       case (slt_sl) 
         SW: byte_mask = 4'b1111;
         SB: begin
@@ -2089,7 +2981,7 @@ module mask_store (
 
   localparam SW = 3'b010, SB = 3'b000, SH = 3'b001;
 
-  always_comb begin
+  always @ (*) begin
       case (slt_sl) 
         SW: data_to_cache = st_data;
         SB: begin
@@ -2112,65 +3004,7 @@ module mask_store (
       endcase
 
   end
-
-
 endmodule
-`endif
-
-`ifndef MASK_LOAD
-`define MASK_LOAD
-module mask_load (
-  input logic [2:0] slt_sl,
-  input logic [31:0] ld_data,
-  input logic [1:0] addr_sp,
-  output logic [31:0] data_after_load
-);
-
-  localparam LW = 3'b101, LB = 3'b011, LH = 3'b100;
-  localparam LBU = 3'b110, LHU = 3'b111;
-
-  always_comb begin
-      /*
-      case (slt_sl) 
-        LW: data_after_load = ld_data;
-        LB: begin
-          case(addr_sp)
-            2'b00: data_after_load = {{24{ld_data[7]}}, ld_data[7:0]};
-            2'b01: data_after_load = {{24{ld_data[15]}}, ld_data[15:8]};
-            2'b10: data_after_load = {{24{ld_data[23]}}, ld_data[23:16]};
-            2'b11: data_after_load = {{24{ld_data[31]}}, ld_data[31:24]};
-            default: data_after_load = ld_data;
-          endcase
-        end
-        LH: begin
-          case(addr_sp[1])
-            1'b0: data_after_load = {{16{ld_data[15]}}, ld_data[15:0]};
-            1'b1: data_after_load = {{16{ld_data[31]}}, ld_data[31:16]};
-            default: data_after_load = ld_data;
-          endcase
-        end
-        LBU: begin
-          case(addr_sp)
-            2'b00: data_after_load = {24'b0, ld_data[7:0]};
-            2'b01: data_after_load = {24'b0, ld_data[15:8]};
-            2'b10: data_after_load = {24'b0, ld_data[23:16]};
-            2'b11: data_after_load = {24'b0, ld_data[31:24]};
-            default: data_after_load = ld_data;
-          endcase
-        end
-        LHU: begin
-          case(addr_sp[1])
-            1'b0: data_after_load = {16'b0, ld_data[15:0]};
-            1'b1: data_after_load = {16'b0, ld_data[31:16]};
-            default: data_after_load = ld_data;
-          endcase
-        end
-        default: data_after_load = ld_data;
-      endcase*/
-      data_after_load = ld_data;
-  end
-endmodule
-
 `endif
 
 `ifndef DEMUX_SEL_MEM
@@ -2417,7 +3251,7 @@ module mux_3_1_lsu(
 );
   logic [1:0] addr_sel ;
   logic [1:0] addr_sel_tmp;
-  always_comb begin
+  always @ (*) begin
       case (i_lsu_addr[31:16])
         16'h1001:  addr_sel  =  2'b00; // SW
         16'h1000:  addr_sel  =  2'b01; // LCD
@@ -2438,11 +3272,6 @@ module mux_3_1_lsu(
       default: o_ld_data = 32'd0;    
     endcase
   end
-/*
-  always_ff @ (posedge i_clk) begin
-	o_ld_data <= load_data_tmp;
-  end
-  */
 endmodule
 
 /*------------------------------------------------------------*/
@@ -2515,7 +3344,29 @@ module memory_cycle(
     // Debug: bubble up cache hit from LSU
     output logic         o_mem_cache_hit_debug,
     // Debug: bubble up cache miss from LSU
-    output logic         o_mem_cache_miss_debug
+    output logic         o_mem_cache_miss_debug,
+
+    // L2 SRAM physical pins (bubble up to pipeline)
+    output logic         o_mem_l2sram_ce_n,
+    output logic         o_mem_l2sram_oe_n,
+    output logic         o_mem_l2sram_we_n,
+    output logic         o_mem_l2sram_lb_n,
+    output logic         o_mem_l2sram_ub_n,
+    output logic [17:0]  o_mem_l2sram_addr,
+    inout  wire  [15:0]  io_mem_l2sram_dq,
+
+    // SDRAM physical interface pins (bubble up to pipeline)
+    output logic        o_mem_dram_clk,
+    output logic        o_mem_dram_cke,
+    output logic        o_mem_dram_cs_n,
+    output logic        o_mem_dram_ras_n,
+    output logic        o_mem_dram_cas_n,
+    output logic        o_mem_dram_we_n,
+    output logic [1:0]  o_mem_dram_ba,
+    output logic [11:0] o_mem_dram_addr,
+    output logic        o_mem_dram_ldqm,
+    output logic        o_mem_dram_udqm,
+    inout  wire  [15:0] io_mem_dram_dq
 );
     
     // Internal signals
@@ -2550,7 +3401,7 @@ module memory_cycle(
     logic          mem_access;
     // Latch request info to hold through cache transaction
     logic          mem_req_active;
-    logic [31:0]   latched_addr;
+    //logic [31:0]   latched_addr;
     logic          latched_wr_en;
     logic [31:0]   latched_wdata;
 
@@ -2569,11 +3420,9 @@ module memory_cycle(
     );
 
     // Select current vs latched request for LSU/cache
-    logic [31:0] lsu_addr_mux;
     logic        lsu_wr_en_mux;
     logic [31:0] lsu_wdata_mux;
 
-    assign lsu_addr_mux  = mem_req_active ? latched_addr  : i_mem_alu_data;
     assign lsu_wr_en_mux = mem_req_active ? latched_wr_en : i_mem_lsu_wren;
     assign lsu_wdata_mux = mem_req_active ? latched_wdata : i_mem_rs2_data;
 
@@ -2606,21 +3455,42 @@ module memory_cycle(
         .o_cache_stall (internal_stall),
         .o_cache_done  (o_mem_cache_done),
         .o_cache_hit_debug (o_mem_cache_hit_debug),
-        .o_cache_miss_debug (o_mem_cache_miss_debug)
+        .o_cache_miss_debug (o_mem_cache_miss_debug),
+
+        .o_l2sram_ce_n (o_mem_l2sram_ce_n),
+        .o_l2sram_oe_n (o_mem_l2sram_oe_n),
+        .o_l2sram_we_n (o_mem_l2sram_we_n),
+        .o_l2sram_lb_n (o_mem_l2sram_lb_n),
+        .o_l2sram_ub_n (o_mem_l2sram_ub_n),
+        .o_l2sram_addr (o_mem_l2sram_addr),
+        .io_l2sram_dq  (io_mem_l2sram_dq),
+
+        // SDRAM physical interface pins (bubble up to pipeline)
+        .o_dram_clk    (o_mem_dram_clk),
+        .o_dram_cke    (o_mem_dram_cke),
+        .o_dram_cs_n   (o_mem_dram_cs_n),
+        .o_dram_ras_n  (o_mem_dram_ras_n),
+        .o_dram_cas_n  (o_mem_dram_cas_n),
+        .o_dram_we_n   (o_mem_dram_we_n),
+        .o_dram_ba     (o_mem_dram_ba),
+        .o_dram_addr   (o_mem_dram_addr),
+        .o_dram_ldqm   (o_mem_dram_ldqm),
+        .o_dram_udqm   (o_mem_dram_udqm),
+        .io_dram_dq    (io_mem_dram_dq)
         );
 
     // Latch request on mem_access and hold until cache finishes (internal_stall deasserts)
     always_ff @(posedge i_clk or posedge i_reset) begin
         if (i_reset) begin
             mem_req_active <= 1'b0;
-            latched_addr   <= 32'b0;
+            //latched_addr   <= 32'b0;
             latched_wr_en  <= 1'b0;
             latched_wdata  <= 32'b0;
         end else begin
             // Start new request
             if (!mem_req_active && mem_access) begin
                 mem_req_active <= 1'b1;
-                latched_addr   <= i_mem_alu_data;
+                //latched_addr   <= i_mem_alu_data;
                 latched_wr_en  <= i_mem_lsu_wren;
                 latched_wdata  <= i_mem_rs2_data;
             end
@@ -2818,7 +3688,29 @@ module pipelined (
     // Debug: cache hit propagated from cache -> LSU -> MEM -> top
     output logic        o_cache_hit_debug,
     // Debug: cache miss propagated from cache -> LSU -> MEM -> top
-    output logic        o_cache_miss_debug
+    output logic        o_cache_miss_debug,
+
+    // L2 SRAM physical pins (for external real SRAM)
+    output logic        o_l2sram_ce_n,
+    output logic        o_l2sram_oe_n,
+    output logic        o_l2sram_we_n,
+    output logic        o_l2sram_lb_n,
+    output logic        o_l2sram_ub_n,
+    output logic [17:0] o_l2sram_addr,
+    inout  wire  [15:0] io_l2sram_dq,
+
+    // SDRAM physical interface pins (for external IS42S16400)
+    output logic        o_dram_clk,
+    output logic        o_dram_cke,
+    output logic        o_dram_cs_n,
+    output logic        o_dram_ras_n,
+    output logic        o_dram_cas_n,
+    output logic        o_dram_we_n,
+    output logic [1:0]  o_dram_ba,
+    output logic [11:0] o_dram_addr,
+    output logic        o_dram_ldqm,
+    output logic        o_dram_udqm,
+    inout  wire  [15:0] io_dram_dq
 );
 logic Stall;
 logic flush;
@@ -2895,6 +3787,24 @@ logic ctrl_wb;
 logic stall_cache;
 logic cache_hit_debug;
 logic cache_miss_debug;
+logic l2sram_ce_n;
+logic l2sram_oe_n;
+logic l2sram_we_n;
+logic l2sram_lb_n;
+logic l2sram_ub_n;
+logic [17:0] l2sram_addr;
+
+// SDRAM controller signals (from LSU sdram_controler instance through memory_cycle)
+logic        dram_clk;
+logic        dram_cke;
+logic        dram_cs_n;
+logic        dram_ras_n;
+logic        dram_cas_n;
+logic        dram_we_n;
+logic [1:0]  dram_ba;
+logic [11:0] dram_addr;
+logic        dram_ldqm;
+logic        dram_udqm;
     fetch_cycle fetch_top(
         .i_fetch_clk        (i_clk),
         .i_fetch_reset      (i_reset),
@@ -3056,7 +3966,27 @@ logic cache_miss_debug;
         .o_mem_cache_done        (o_cache_done),
         .o_mem_cache_hit_debug   (cache_hit_debug),
         .o_mem_cache_miss_debug  (cache_miss_debug),
-        .o_mem_slt_sl_wb          (slt_sl_wb)
+        .o_mem_slt_sl_wb          (slt_sl_wb),
+        .o_mem_l2sram_ce_n       (l2sram_ce_n),
+        .o_mem_l2sram_oe_n       (l2sram_oe_n),
+        .o_mem_l2sram_we_n       (l2sram_we_n),
+        .o_mem_l2sram_lb_n       (l2sram_lb_n),
+        .o_mem_l2sram_ub_n       (l2sram_ub_n),
+        .o_mem_l2sram_addr       (l2sram_addr),
+        .io_mem_l2sram_dq        (io_l2sram_dq),
+
+        // SDRAM physical interface pins (from SDRAM controller in LSU)
+        .o_mem_dram_clk          (dram_clk),
+        .o_mem_dram_cke          (dram_cke),
+        .o_mem_dram_cs_n         (dram_cs_n),
+        .o_mem_dram_ras_n        (dram_ras_n),
+        .o_mem_dram_cas_n        (dram_cas_n),
+        .o_mem_dram_we_n         (dram_we_n),
+        .o_mem_dram_ba           (dram_ba),
+        .o_mem_dram_addr         (dram_addr),
+        .o_mem_dram_ldqm         (dram_ldqm),
+        .o_mem_dram_udqm         (dram_udqm),
+        .io_mem_dram_dq          (io_dram_dq)
     );
 
     writeback_cycle writeback_top(
@@ -3123,44 +4053,27 @@ logic cache_miss_debug;
     assign o_ctrl = ctrl_wb;
     assign o_cache_hit_debug = cache_hit_debug;
     assign o_cache_miss_debug = cache_miss_debug;
+    assign o_l2sram_ce_n = l2sram_ce_n;
+    assign o_l2sram_oe_n = l2sram_oe_n;
+    assign o_l2sram_we_n = l2sram_we_n;
+    assign o_l2sram_lb_n = l2sram_lb_n;
+    assign o_l2sram_ub_n = l2sram_ub_n;
+    assign o_l2sram_addr = l2sram_addr;
+
+    // Assign SDRAM physical pins from internal signals
+    assign o_dram_clk = dram_clk; //memory_top.lsu_memory.o_dram_clk; // dram_clk;
+    assign o_dram_cke = dram_cke;
+    assign o_dram_cs_n = dram_cs_n;
+    assign o_dram_ras_n = dram_ras_n;
+    assign o_dram_cas_n = dram_cas_n;
+    assign o_dram_we_n = dram_we_n;
+    assign o_dram_ba = dram_ba;
+    assign o_dram_addr = dram_addr;
+    assign o_dram_ldqm = dram_ldqm;
+    assign o_dram_udqm = dram_udqm;
 endmodule
 `endif
 // ===== END FILE: pipeline.sv =====
-
-
-// ===== BEGIN FILE: Pipeline_Tb.sv =====
-`ifndef PIPELINE_TB
-`define PIPELINE_TB
-`timescale 1ps/1ps
-
-module Pipeline_Cache_Tb ();
-    logic tb_clk;
-    logic tb_reset;
-    logic [31:0] tb_io_sw;
-    pipelined pipeline_cache_test (
-        .i_clk(tb_clk),
-        .i_reset(tb_reset),
-        .i_io_sw(tb_io_sw)
-    );
-   // Clock generation
-    always #5 tb_clk = ~tb_clk;
-	
-    initial begin
-        $dumpfile("wave.vcd");      // file VCD sáº½ sinh ra
-        $dumpvars(0, Pipeline_Cache_Tb); //tÃªn module testbench top-level
-        tb_clk = 0;
-        tb_reset = 1;    // Reset Ä‘á»ƒ PC = 0
-        #7ps;
-        force  tb_reset = 0; 
-        force  tb_io_sw = 32'ha;
-        #100000ps;
-        $finish;  
-    end
-
-endmodule
-
-`endif
-// ===== END FILE: Pipeline_Tb.sv =====
 
 
 // ===== BEGIN FILE: regfile.sv =====
@@ -3227,6 +4140,468 @@ endmodule
 // ===== END FILE: regfile.sv =====
 
 
+// ===== BEGIN FILE: sdram_controler.sv =====
+`ifndef SDRAM_CONTROLER
+`define SDRAM_CONTROLER
+
+// SDRAM controller for ISSI IS42S16400 on Altera DE2.
+// User side uses a simple request/ready handshake compatible with sram.sv.
+// Each 32-bit transaction is split into 2 x 16-bit SDRAM accesses.
+// Closed-page policy is used (READ/WRITE with auto-precharge).
+
+module sdram_controler #(
+    // System clock frequency used to convert microseconds to clock cycles.
+    parameter int CLK_FREQ_HZ            = 50_000_000,
+    // Power-up wait time before issuing SDRAM commands.
+    parameter int INIT_WAIT_US           = 200,
+    // Refresh period in cycles (7.8us target at 50MHz).
+    parameter int REFRESH_INTERVAL_CYC   = 390,   // ~7.8us @ 50MHz
+    // SDRAM timing parameters expressed in controller clock cycles.
+    parameter int TRP_CYCLES             = 2,
+    parameter int TRCD_CYCLES            = 2,
+    parameter int TRFC_CYCLES            = 4,
+    parameter int TMRD_CYCLES            = 2,
+    parameter int CAS_LATENCY_CYCLES     = 2,
+    parameter int WRITE_RECOVERY_CYCLES  = 2
+) (
+    // Global clock/reset.
+    input  logic        i_clk,
+    input  logic        i_reset,
+
+    // User/cache-side request interface.
+    // i_sram_enb: request valid (one 32-bit transaction).
+    // i_wr_en: 1=write, 0=read.
+    // i_addr: byte address from CPU/cache side.
+    // i_wdata: write data for write requests.
+    input  logic        i_sram_enb,
+    input  logic        i_wr_en,
+    input  logic [31:0] i_addr,
+    input  logic [31:0] i_wdata,
+
+    // User/cache-side response interface.
+    // o_rdata valid when o_ready pulses high.
+    output logic [31:0] o_rdata,
+    // o_ready pulses 1 cycle when one 32-bit transaction completes.
+    output logic        o_ready,
+
+    // SDRAM physical interface (IS42S16400-compatible signaling).
+    // Command encoding uses CS#/RAS#/CAS#/WE# combinations.
+    output logic        o_dram_clk,
+    output logic        o_dram_cke,
+    output logic        o_dram_cs_n,
+    output logic        o_dram_ras_n,
+    output logic        o_dram_cas_n,
+    output logic        o_dram_we_n,
+    output logic [1:0]  o_dram_ba,
+    output logic [11:0] o_dram_addr,
+    output logic        o_dram_ldqm,
+    output logic        o_dram_udqm,
+    inout  wire [15:0]  io_dram_dq
+);
+
+    // Number of cycles to wait after reset before init command sequence.
+    localparam int INIT_WAIT_CYCLES = (CLK_FREQ_HZ / 1_000_000) * INIT_WAIT_US;
+    // Guard against invalid/non-positive refresh interval configuration.
+    localparam int REFRESH_INTERVAL_SAFE = (REFRESH_INTERVAL_CYC > 0) ? REFRESH_INTERVAL_CYC : 1;
+
+    // BL=1, sequential burst, CAS=2, standard op mode, single write burst.
+    localparam logic [11:0] MODE_REG = 12'b0010_0010_0000;
+
+    // FSM state definitions.
+    // S_INIT_WAIT : wait initial power-up delay.
+    // S_INIT_PRE  : issue PRECHARGE ALL command.
+    // S_INIT_TRP  : wait tRP after precharge.
+    // S_INIT_AR1  : issue AUTO REFRESH #1.
+    // S_INIT_AR1W : wait tRFC after refresh #1.
+    // S_INIT_AR2  : issue AUTO REFRESH #2.
+    // S_INIT_AR2W : wait tRFC after refresh #2.
+    // S_INIT_MRS  : load SDRAM mode register.
+    // S_INIT_TMRD : wait tMRD after MRS.
+    // S_IDLE      : idle state, accept new request or refresh.
+    // S_REF_CMD   : issue periodic AUTO REFRESH command.
+    // S_REF_WAIT  : wait tRFC for periodic refresh.
+    // S_ACTIVATE  : issue ACTIVATE with selected bank/row.
+    // S_TRCD_WAIT : wait tRCD before READ/WRITE.
+    // S_RW_CMD    : issue READ or WRITE command with auto-precharge.
+    // S_READ_WAIT : wait CAS latency for READ.
+    // S_READ_CAP  : capture read data from DQ bus.
+    // S_PRE_WAIT  : wait post-access recovery/precharge time.
+    // S_NEXT_HALF : move from low-half to high-half access.
+    // S_DONE      : transaction done, pulse o_ready.
+    typedef enum logic [4:0] {
+        S_INIT_WAIT   = 5'd0,
+        S_INIT_PRE    = 5'd1,
+        S_INIT_TRP    = 5'd2,
+        S_INIT_AR1    = 5'd3,
+        S_INIT_AR1W   = 5'd4,
+        S_INIT_AR2    = 5'd5,
+        S_INIT_AR2W   = 5'd6,
+        S_INIT_MRS    = 5'd7,
+        S_INIT_TMRD   = 5'd8,
+        S_IDLE        = 5'd9,
+        S_REF_CMD     = 5'd10,
+        S_REF_WAIT    = 5'd11,
+        S_ACTIVATE    = 5'd12,
+        S_TRCD_WAIT   = 5'd13,
+        S_RW_CMD      = 5'd14,
+        S_READ_WAIT   = 5'd15,
+        S_READ_CAP    = 5'd16,
+        S_PRE_WAIT    = 5'd17,
+        S_NEXT_HALF   = 5'd18,
+        S_DONE        = 5'd19
+    } state_t;
+
+    // Current and next FSM state.
+    state_t state, next_state;
+
+    // init_done indicates controller can start normal refresh and requests.
+    logic        init_done;
+    // req_accept is one-cycle internal strobe when request is latched.
+    logic        req_accept;
+
+    // Latched user request fields (held during multi-cycle SDRAM transaction).
+    logic [31:0] req_addr_reg;
+    logic [31:0] req_wdata_reg;
+    logic        req_wr_en_reg;
+
+    // Read data assembly register for 2 x 16-bit halfword read.
+    logic [31:0] read_data_reg;
+
+    // Generic wait counter reused by timing wait states.
+    logic [15:0] wait_cnt;
+    // Periodic refresh cycle counter.
+    logic [15:0] refresh_cnt;
+    // Refresh request flag set by scheduler and consumed in S_IDLE.
+    logic        refresh_pending;
+
+    logic        half_sel; // 0: lower 16-bit, 1: upper 16-bit
+    // Derived halfword address in SDRAM word space.
+    logic [21:0] halfword_addr;
+    // Decoded bank/row/column from halfword address.
+    logic [1:0]  cur_bank;
+    logic [11:0] cur_row;
+    logic [7:0]  cur_col;
+
+    // DQ output path and output-enable for bidirectional data bus.
+    logic [15:0] dq_out;
+    logic        dq_oe;
+    // Sampled DQ input data.
+    logic [15:0] dq_in;
+
+    // Column address placed on SDRAM address bus for READ/WRITE.
+    // A10 is forced to 1 to enable auto-precharge.
+    logic [11:0] rw_col_addr;
+
+    // SDRAM clock is driven directly from controller clock.
+    assign o_dram_clk = i_clk;
+    // Internal alias for inbound data bus.
+    assign dq_in = io_dram_dq;
+    // Tri-state DQ bus except during write command cycles.
+    assign io_dram_dq = dq_oe ? dq_out : 16'hzzzz;
+
+    // Normal operation starts at S_IDLE and later states.
+    assign init_done = (state >= S_IDLE);
+    // Request is accepted only in IDLE and when refresh is not pending.
+    assign req_accept = (state == S_IDLE) && (!refresh_pending) && i_sram_enb;
+
+    // 32-bit byte address -> 16-bit halfword address.
+    // Mapping: [21:20]=bank, [19:8]=row, [7:0]=column.
+    always @* begin
+        halfword_addr = req_addr_reg[22:1] + {21'b0, half_sel};
+
+        cur_bank = halfword_addr[21:20];
+        cur_row  = halfword_addr[19:8];
+        cur_col  = halfword_addr[7:0];
+        rw_col_addr = {4'b0100, cur_col};
+    end
+
+    always @* begin
+        next_state = state;
+
+        case (state)
+            S_INIT_WAIT: begin
+                if (wait_cnt == 0)
+                    next_state = S_INIT_PRE;
+                else
+                    next_state = S_INIT_WAIT;
+            end
+            S_INIT_PRE:   next_state = S_INIT_TRP;
+            S_INIT_TRP: begin
+                if (wait_cnt == 0)
+                    next_state = S_INIT_AR1;
+                else
+                    next_state = S_INIT_TRP;
+            end
+            S_INIT_AR1:   next_state = S_INIT_AR1W;
+            S_INIT_AR1W: begin
+                if (wait_cnt == 0)
+                    next_state = S_INIT_AR2;
+                else
+                    next_state = S_INIT_AR1W;
+            end
+            S_INIT_AR2:   next_state = S_INIT_AR2W;
+            S_INIT_AR2W: begin
+                if (wait_cnt == 0)
+                    next_state = S_INIT_MRS;
+                else
+                    next_state = S_INIT_AR2W;
+            end
+            S_INIT_MRS:   next_state = S_INIT_TMRD;
+            S_INIT_TMRD: begin
+                if (wait_cnt == 0)
+                    next_state = S_IDLE;
+                else
+                    next_state = S_INIT_TMRD;
+            end
+
+            S_IDLE: begin
+                if (refresh_pending)
+                    next_state = S_REF_CMD;
+                else if (i_sram_enb)
+                    next_state = S_ACTIVATE;
+                else
+                    next_state = S_IDLE;
+            end
+
+            S_REF_CMD:    next_state = S_REF_WAIT;
+            S_REF_WAIT: begin
+                if (wait_cnt == 0)
+                    next_state = S_IDLE;
+                else
+                    next_state = S_REF_WAIT;
+            end
+
+            S_ACTIVATE:   next_state = S_TRCD_WAIT;
+            S_TRCD_WAIT: begin
+                if (wait_cnt == 0)
+                    next_state = S_RW_CMD;
+                else
+                    next_state = S_TRCD_WAIT;
+            end
+            S_RW_CMD: begin
+                if (req_wr_en_reg)
+                    next_state = S_PRE_WAIT;
+                else
+                    next_state = S_READ_WAIT;
+            end
+            S_READ_WAIT: begin
+                if (wait_cnt == 0)
+                    next_state = S_READ_CAP;
+                else
+                    next_state = S_READ_WAIT;
+            end
+            S_READ_CAP:   next_state = S_PRE_WAIT;
+            S_PRE_WAIT: begin
+                if (wait_cnt == 0)
+                    next_state = S_NEXT_HALF;
+                else
+                    next_state = S_PRE_WAIT;
+            end
+            S_NEXT_HALF: begin
+                if (half_sel == 1'b1)
+                    next_state = S_DONE;
+                else
+                    next_state = S_ACTIVATE;
+            end
+            S_DONE:       next_state = S_IDLE;
+
+            default:      next_state = S_INIT_WAIT;
+        endcase
+    end
+
+    always_ff @(posedge i_clk or posedge i_reset) begin
+        if (i_reset) begin
+            state            <= S_INIT_WAIT;
+            wait_cnt         <= (INIT_WAIT_CYCLES > 0) ? INIT_WAIT_CYCLES - 1 : 0;
+            refresh_cnt      <= 16'd0;
+            refresh_pending  <= 1'b0;
+
+            req_addr_reg     <= 32'd0;
+            req_wdata_reg    <= 32'd0;
+            req_wr_en_reg    <= 1'b0;
+
+            read_data_reg    <= 32'd0;
+            half_sel         <= 1'b0;
+        end else begin
+            state <= next_state;
+
+            // Refresh scheduler runs only after initialization is complete.
+            if (init_done) begin
+                if (state == S_REF_CMD) begin
+                    refresh_cnt <= 16'd0;
+                    refresh_pending <= 1'b0;
+                end else if (refresh_cnt >= REFRESH_INTERVAL_SAFE - 1) begin
+                    refresh_cnt <= 16'd0;
+                    refresh_pending <= 1'b1;
+                end else begin
+                    refresh_cnt <= refresh_cnt + 16'd1;
+                end
+            end else begin
+                refresh_cnt <= 16'd0;
+                refresh_pending <= 1'b0;
+            end
+
+            if (req_accept) begin
+                req_addr_reg  <= i_addr;
+                req_wdata_reg <= i_wdata;
+                req_wr_en_reg <= i_wr_en;
+            end
+
+            case (state)
+                S_INIT_WAIT: if (wait_cnt != 0) wait_cnt <= wait_cnt - 16'd1;
+
+                S_INIT_PRE:  wait_cnt <= (TRP_CYCLES > 0) ? TRP_CYCLES - 1 : 0;
+                S_INIT_TRP:  if (wait_cnt != 0) wait_cnt <= wait_cnt - 16'd1;
+
+                S_INIT_AR1:  wait_cnt <= (TRFC_CYCLES > 0) ? TRFC_CYCLES - 1 : 0;
+                S_INIT_AR1W: if (wait_cnt != 0) wait_cnt <= wait_cnt - 16'd1;
+
+                S_INIT_AR2:  wait_cnt <= (TRFC_CYCLES > 0) ? TRFC_CYCLES - 1 : 0;
+                S_INIT_AR2W: if (wait_cnt != 0) wait_cnt <= wait_cnt - 16'd1;
+
+                S_INIT_MRS:  wait_cnt <= (TMRD_CYCLES > 0) ? TMRD_CYCLES - 1 : 0;
+                S_INIT_TMRD: if (wait_cnt != 0) wait_cnt <= wait_cnt - 16'd1;
+
+                S_IDLE: begin
+                    half_sel <= 1'b0;
+                end
+
+                S_REF_CMD: begin
+                    wait_cnt <= (TRFC_CYCLES > 0) ? TRFC_CYCLES - 1 : 0;
+                end
+
+                S_REF_WAIT: begin
+                    if (wait_cnt != 0)
+                        wait_cnt <= wait_cnt - 16'd1;
+                end
+
+                S_ACTIVATE: begin
+                    wait_cnt <= (TRCD_CYCLES > 0) ? TRCD_CYCLES - 1 : 0;
+                end
+
+                S_TRCD_WAIT: begin
+                    if (wait_cnt != 0)
+                        wait_cnt <= wait_cnt - 16'd1;
+                end
+
+                S_RW_CMD: begin
+                    if (req_wr_en_reg)
+                        wait_cnt <= (WRITE_RECOVERY_CYCLES > 0) ? WRITE_RECOVERY_CYCLES - 1 : 0;
+                    else
+                        wait_cnt <= (CAS_LATENCY_CYCLES > 0) ? CAS_LATENCY_CYCLES - 1 : 0;
+                end
+
+                S_READ_WAIT: begin
+                    if (wait_cnt != 0)
+                        wait_cnt <= wait_cnt - 16'd1;
+                end
+
+                S_READ_CAP: begin
+                    if (half_sel == 1'b0)
+                        read_data_reg[15:0] <= dq_in;
+                    else
+                        read_data_reg[31:16] <= dq_in;
+
+                    wait_cnt <= (TRP_CYCLES > 0) ? TRP_CYCLES - 1 : 0;
+                end
+
+                S_PRE_WAIT: begin
+                    if (wait_cnt != 0)
+                        wait_cnt <= wait_cnt - 16'd1;
+                end
+
+                S_NEXT_HALF: begin
+                    if (half_sel == 1'b0)
+                        half_sel <= 1'b1;
+                end
+
+                default: begin
+                end
+            endcase
+        end
+    end
+
+    always @* begin
+        // Default command: NOP
+        o_dram_cke  = 1'b1;
+        o_dram_cs_n = 1'b0;
+        o_dram_ras_n = 1'b1;
+        o_dram_cas_n = 1'b1;
+        o_dram_we_n  = 1'b1;
+        o_dram_ba    = 2'b00;
+        o_dram_addr  = 12'b0;
+        o_dram_ldqm  = 1'b0;
+        o_dram_udqm  = 1'b0;
+
+        dq_oe  = 1'b0;
+        dq_out = 16'h0000;
+
+        o_rdata = read_data_reg;
+        o_ready = 1'b0;
+
+        case (state)
+            S_INIT_PRE: begin
+                // PRECHARGE ALL (A10=1)
+                o_dram_ras_n = 1'b0;
+                o_dram_cas_n = 1'b1;
+                o_dram_we_n  = 1'b0;
+                o_dram_addr[10] = 1'b1;
+            end
+
+            S_INIT_AR1, S_INIT_AR2, S_REF_CMD: begin
+                o_dram_ras_n = 1'b0;
+                o_dram_cas_n = 1'b0;
+                o_dram_we_n  = 1'b1;
+            end
+
+            S_INIT_MRS: begin
+                o_dram_ras_n = 1'b0;
+                o_dram_cas_n = 1'b0;
+                o_dram_we_n  = 1'b0;
+                o_dram_ba    = 2'b00;
+                o_dram_addr  = MODE_REG;
+            end
+
+            S_ACTIVATE: begin
+                o_dram_ras_n = 1'b0;
+                o_dram_cas_n = 1'b1;
+                o_dram_we_n  = 1'b1;
+                o_dram_ba    = cur_bank;
+                o_dram_addr  = cur_row;
+            end
+
+            S_RW_CMD: begin
+                o_dram_ba   = cur_bank;
+                o_dram_addr = rw_col_addr;
+
+                if (req_wr_en_reg) begin
+                    o_dram_ras_n = 1'b1;
+                    o_dram_cas_n = 1'b0;
+                    o_dram_we_n  = 1'b0;
+                    dq_oe = 1'b1;
+                    dq_out = (half_sel == 1'b0) ? req_wdata_reg[15:0] : req_wdata_reg[31:16];
+                end else begin
+                    o_dram_ras_n = 1'b1;
+                    o_dram_cas_n = 1'b0;
+                    o_dram_we_n  = 1'b1;
+                end
+            end
+
+            S_DONE: begin
+                o_ready = 1'b1;
+            end
+
+            default: begin
+            end
+        endcase
+    end
+
+endmodule
+
+`endif
+// ===== END FILE: sdram_controler.sv =====
+
+
 // ===== BEGIN FILE: shift_left_logical.sv =====
 `ifndef SHIFT_LEFT_LOGICAL
 `define SHIFT_LEFT_LOGICAL
@@ -3236,7 +4611,7 @@ module shift_left_logical (
     output logic [31:0] data_out);   // Káº¿t quáº£
 
 
-    always_comb begin
+    always @ (*) begin
         case (shift_amt)
             5'd0:  data_out = data_in;
             5'd1:  data_out = {data_in[30:0], 1'b0};
@@ -3288,7 +4663,7 @@ module shift_right_arithmetic (
     input  logic [4:0] shift_amt, // Sá»‘ bit cáº§n dá»‹ch
     output logic [31:0] data_out); //Káº¿t quáº£
 
-    always_comb begin
+    always @ (*) begin
         case (shift_amt)
             5'd0:  data_out = data_in;
             5'd1:  data_out = {data_in[31], data_in[31:1]};
@@ -3341,7 +4716,7 @@ module shift_right_logical (
     output logic [31:0] data_out);   // Káº¿t quáº£ 
 
 
-    always_comb begin
+    always @(*) begin
         case (shift_amt)
             5'd0:  data_out = data_in;
             5'd1:  data_out = {1'b0, data_in[31:1]};
@@ -3405,7 +4780,7 @@ module slt_sltu (
     );
 
     // So sÃ¡nh
-    always_comb begin
+    always @ (*) begin
         if (Sel == 1'b0) begin  // SLT (cÃ³ dáº¥u)
             // Náº¿u khÃ¡c dáº¥u: A<0 && B>=0 â†’ 1; B<0 && A>=0 â†’ 0
             // Náº¿u cÃ¹ng dáº¥u: dÃ¹ng bit dáº¥u cá»§a (A - B)
@@ -3427,7 +4802,7 @@ endmodule
 // ===== BEGIN FILE: sram.sv =====
 `ifndef SRAM_SIMPLE
 `define SRAM_SIMPLE
-
+//`include "sram_model.sv"
 // Simple synchronous SRAM to use with the cache testbench
 // - 32-bit data, word addressed by i_addr[31:2]
 // - o_ready follows i_sram_enb with 1-cycle latency
@@ -3472,6 +4847,24 @@ module sram (
         end
     end
 
+// synopsys translate_off
+    always @(posedge i_clk) begin
+        if (!i_reset && i_sram_enb) begin
+            if (i_addr[31:2] < DEPTH) begin
+                if (i_wr_en)
+                    $display("[MAIN MEM WRITE] t=%0t addr=0x%08h index=%0d data=0x%08h",
+                        $time, i_addr, i_addr[31:2], i_wdata);
+                else
+                    $display("[MAIN MEM READ ] t=%0t addr=0x%08h index=%0d data=0x%08h",
+                        $time, i_addr, i_addr[31:2], mem[i_addr[31:2]]);
+            end else begin
+                $display("[MAIN MEM OOR  ] t=%0t addr=0x%08h index=%0d",
+                    $time, i_addr, i_addr[31:2]);
+            end
+        end
+    end
+// synopsys translate_on
+
     // combinational read
 
     assign o_rdata = i_reset ? 32'b0000_0000: mem[i_addr[31:2]];
@@ -3481,6 +4874,136 @@ module sram (
 endmodule
 `endif
 // ===== END FILE: sram.sv =====
+
+
+// ===== BEGIN FILE: sram_model.sv =====
+// ============================================================
+//  IS61LV25616AL â€” Behavioral simulation model
+//  256K Ã— 16-bit asynchronous SRAM (ISSI IS61LV25616AL-10)
+//
+//  Connects directly to cache_l2_v2 external SRAM interface:
+//    cache_l2_v2 port      â†’  this module port
+//    o_l2sram_ce_n         â†’  i_ce_n
+//    o_l2sram_oe_n         â†’  i_oe_n
+//    o_l2sram_we_n         â†’  i_we_n
+//    o_l2sram_lb_n         â†’  i_lb_n
+//    o_l2sram_ub_n         â†’  i_ub_n
+//    o_l2sram_addr [17:0]  â†’  i_addr
+//    io_l2sram_dq  [15:0]  â†’  io_dq
+//
+//  Address mapping (matches cache_l2_v2::l2sram_half_addr):
+//    [17:5]  way index  (13 bits, NUM_WAY=8192)
+//    [4:1]   set index  (4  bits, NUM_SET=16)
+//    [0]     half-word select (0=lower 16 b, 1=upper 16 b of 32-bit line)
+// ============================================================
+`timescale 1ps/1ps
+
+module sram_model #(
+    parameter int  MEM_DEPTH      = 1024, //262144,  // 2^18 half-word locations (256KÃ—16)
+    parameter int  ACCESS_TIME_NS = 10,      // tAA: address â†’ valid output (ns)
+    parameter      INIT_FILE      = ""       // Optional hex image ($readmemh)
+) (
+    input  logic         i_ce_n,   // Chip Enable   (active low)
+    input  logic         i_oe_n,   // Output Enable (active low)
+    input  logic         i_we_n,   // Write Enable  (active low)
+    input  logic         i_lb_n,   // Lower Byte    (active low, DQ[7:0])
+    input  logic         i_ub_n,   // Upper Byte    (active low, DQ[15:8])
+    input  logic [17:0]  i_addr,   // 18-bit half-word address [A17:A0]
+    inout  wire  [15:0]  io_dq     // 16-bit bidirectional data bus
+);
+
+    // -------------------------------------------------------------------
+    //  Memory array: 256K Ã— 16-bit
+    // -------------------------------------------------------------------
+    logic [15:0] mem [0:MEM_DEPTH-1];
+
+    initial begin : mem_init
+        integer i;
+        if (INIT_FILE != "") begin
+            $readmemh(INIT_FILE, mem);
+        end else begin
+            for (i = 0; i < MEM_DEPTH; i = i + 1)
+                mem[i] = 16'h0000;
+        end
+    end
+
+    // -------------------------------------------------------------------
+    //  Write path
+    //  For this cache controller, WE_n stays low across WR_LO/WR_HI and
+    //  address/data change between the two halfword writes. Model writes
+    //  whenever write controls are active so both halves are captured.
+    // -------------------------------------------------------------------
+    always @(i_ce_n or i_we_n or i_lb_n or i_ub_n or i_addr or io_dq) begin
+        if (!i_ce_n && !i_we_n) begin
+            if (!i_lb_n) mem[i_addr][7:0]  = io_dq[7:0];
+            if (!i_ub_n) mem[i_addr][15:8] = io_dq[15:8];
+        end
+    end
+
+    // -------------------------------------------------------------------
+    //  Read / output path
+    //  Output enabled when CE_n=0, OE_n=0, WE_n=1.
+    //  DQ bus is Hi-Z otherwise (CE_n=HI | OE_n=HI | WE_n=LO).
+    //  Model tAA on data path only, then gate onto bus by read controls.
+    // -------------------------------------------------------------------
+    logic [15:0] dq_raw;
+    wire  [15:0] dq_delayed;
+    wire         read_active;
+
+    assign read_active = (!i_ce_n && !i_oe_n && i_we_n);
+
+    always @* begin
+        dq_raw = mem[i_addr];
+    end
+
+    // Apply tAA delay from internal cell to output data bus.
+    assign #(ACCESS_TIME_NS) dq_delayed = dq_raw;
+
+    // Byte-select masking on delayed data.
+    wire [15:0] dq_masked;
+    assign dq_masked[7:0]  = (!i_lb_n) ? dq_delayed[7:0]  : 8'hzz;
+    assign dq_masked[15:8] = (!i_ub_n) ? dq_delayed[15:8] : 8'hzz;
+
+    // Gate delayed data to tri-state bus during active read.
+    assign io_dq = read_active ? dq_masked : 16'hzzzz;
+
+    // -------------------------------------------------------------------
+    //  Simulation-only sanity checks
+    // -------------------------------------------------------------------
+`ifndef SYNTHESIS
+    // Warn if WE_n is asserted while chip is not selected
+    always @(negedge i_we_n) begin
+        if (i_ce_n)
+            $display("[SRAM_MODEL @%0t] WARNING: WE_n asserted while CE_n=1 (chip not selected)", $time);
+    end
+
+    // Warn on out-of-range address
+    always @(i_addr) begin
+        if ({1'b0, i_addr} >= MEM_DEPTH)
+            $display("[SRAM_MODEL @%0t] WARNING: address 0x%05h out of range (depth=%0d)", $time, i_addr, MEM_DEPTH);
+    end
+
+    // Display write operations
+    always @* begin
+        if (!i_ce_n && !i_we_n) begin
+            if (!i_lb_n || !i_ub_n) begin
+                $display("[SRAM_MODEL WRITE] @%0t addr=0x%05h data_in[15:0]=0x%04h LB=%b UB=%b", 
+                    $time, i_addr, io_dq, !i_lb_n, !i_ub_n);
+            end
+        end
+    end
+
+    // Display read operations (show both memory cell value and actual io_dq bus)
+    always @* begin
+        if (!i_ce_n && !i_oe_n && i_we_n) begin
+            $display("[SRAM_MODEL READ] @%0t addr=0x%05h mem=0x%04h io_dq=0x%04h CE_n=%b OE_n=%b WE_n=%b LB_n=%b UB_n=%b", 
+                $time, i_addr, mem[i_addr], io_dq, i_ce_n, i_oe_n, i_we_n, i_lb_n, i_ub_n);
+        end
+    end
+`endif
+
+endmodule
+// ===== END FILE: sram_model.sv =====
 
 
 // ===== BEGIN FILE: writeback_cycle.sv =====

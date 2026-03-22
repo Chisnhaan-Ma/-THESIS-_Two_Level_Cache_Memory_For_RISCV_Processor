@@ -64,7 +64,29 @@ module memory_cycle(
     // Debug: bubble up cache hit from LSU
     output logic         o_mem_cache_hit_debug,
     // Debug: bubble up cache miss from LSU
-    output logic         o_mem_cache_miss_debug
+    output logic         o_mem_cache_miss_debug,
+
+    // L2 SRAM physical pins (bubble up to pipeline)
+    output logic         o_mem_l2sram_ce_n,
+    output logic         o_mem_l2sram_oe_n,
+    output logic         o_mem_l2sram_we_n,
+    output logic         o_mem_l2sram_lb_n,
+    output logic         o_mem_l2sram_ub_n,
+    output logic [17:0]  o_mem_l2sram_addr,
+    inout  wire  [15:0]  io_mem_l2sram_dq,
+
+    // SDRAM physical interface pins (bubble up to pipeline)
+    output logic        o_mem_dram_clk,
+    output logic        o_mem_dram_cke,
+    output logic        o_mem_dram_cs_n,
+    output logic        o_mem_dram_ras_n,
+    output logic        o_mem_dram_cas_n,
+    output logic        o_mem_dram_we_n,
+    output logic [1:0]  o_mem_dram_ba,
+    output logic [11:0] o_mem_dram_addr,
+    output logic        o_mem_dram_ldqm,
+    output logic        o_mem_dram_udqm,
+    inout  wire  [15:0] io_mem_dram_dq
 );
     
     // Internal signals
@@ -99,7 +121,7 @@ module memory_cycle(
     logic          mem_access;
     // Latch request info to hold through cache transaction
     logic          mem_req_active;
-    logic [31:0]   latched_addr;
+    //logic [31:0]   latched_addr;
     logic          latched_wr_en;
     logic [31:0]   latched_wdata;
 
@@ -118,11 +140,9 @@ module memory_cycle(
     );
 
     // Select current vs latched request for LSU/cache
-    logic [31:0] lsu_addr_mux;
     logic        lsu_wr_en_mux;
     logic [31:0] lsu_wdata_mux;
 
-    assign lsu_addr_mux  = mem_req_active ? latched_addr  : i_mem_alu_data;
     assign lsu_wr_en_mux = mem_req_active ? latched_wr_en : i_mem_lsu_wren;
     assign lsu_wdata_mux = mem_req_active ? latched_wdata : i_mem_rs2_data;
 
@@ -155,21 +175,42 @@ module memory_cycle(
         .o_cache_stall (internal_stall),
         .o_cache_done  (o_mem_cache_done),
         .o_cache_hit_debug (o_mem_cache_hit_debug),
-        .o_cache_miss_debug (o_mem_cache_miss_debug)
+        .o_cache_miss_debug (o_mem_cache_miss_debug),
+
+        .o_l2sram_ce_n (o_mem_l2sram_ce_n),
+        .o_l2sram_oe_n (o_mem_l2sram_oe_n),
+        .o_l2sram_we_n (o_mem_l2sram_we_n),
+        .o_l2sram_lb_n (o_mem_l2sram_lb_n),
+        .o_l2sram_ub_n (o_mem_l2sram_ub_n),
+        .o_l2sram_addr (o_mem_l2sram_addr),
+        .io_l2sram_dq  (io_mem_l2sram_dq),
+
+        // SDRAM physical interface pins (bubble up to pipeline)
+        .o_dram_clk    (o_mem_dram_clk),
+        .o_dram_cke    (o_mem_dram_cke),
+        .o_dram_cs_n   (o_mem_dram_cs_n),
+        .o_dram_ras_n  (o_mem_dram_ras_n),
+        .o_dram_cas_n  (o_mem_dram_cas_n),
+        .o_dram_we_n   (o_mem_dram_we_n),
+        .o_dram_ba     (o_mem_dram_ba),
+        .o_dram_addr   (o_mem_dram_addr),
+        .o_dram_ldqm   (o_mem_dram_ldqm),
+        .o_dram_udqm   (o_mem_dram_udqm),
+        .io_dram_dq    (io_mem_dram_dq)
         );
 
     // Latch request on mem_access and hold until cache finishes (internal_stall deasserts)
     always_ff @(posedge i_clk or posedge i_reset) begin
         if (i_reset) begin
             mem_req_active <= 1'b0;
-            latched_addr   <= 32'b0;
+            //latched_addr   <= 32'b0;
             latched_wr_en  <= 1'b0;
             latched_wdata  <= 32'b0;
         end else begin
             // Start new request
             if (!mem_req_active && mem_access) begin
                 mem_req_active <= 1'b1;
-                latched_addr   <= i_mem_alu_data;
+                //latched_addr   <= i_mem_alu_data;
                 latched_wr_en  <= i_mem_lsu_wren;
                 latched_wdata  <= i_mem_rs2_data;
             end

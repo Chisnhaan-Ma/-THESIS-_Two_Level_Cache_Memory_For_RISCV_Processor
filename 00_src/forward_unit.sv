@@ -10,11 +10,10 @@ module forward(
 //logic [6:0] opcode_EX;
     logic [4:0] rs1_addr_execute; 
     logic [4:0] rs2_addr_execute;
-    logic [6:0] opcode_fwd;
+    
     // Tách rs1 và rs2 từ instruction 
     assign rs1_addr_execute = i_fwd_inst_execute[19:15];
     assign rs2_addr_execute = i_fwd_inst_execute[24:20];
-    assign opcode_fwd       = i_fwd_inst_execute[6:0];
 
     always @ (*) begin
             //---------- Forward operand a ALU -----------------------

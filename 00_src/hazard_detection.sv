@@ -13,7 +13,7 @@ module hazard_detection(
     // Tách rd từ instruction ở EX stage
     assign rd_addr_execute = i_hazard_inst_execute[11:7];
 
-    always_comb begin
+    always @ (*) begin
         // Nếu lệnh ở EX là load (WBSel = 2'b00) và ghi vào thanh ghi (i_hazard_rd_wren_execute)
         // và rd_addr_execute khớp với i_hazard_rs1_addr_decode hoặc i_hazard_rs2_addr_decode của lệnh hiện tại ở Decode
 			if ((i_hazard_wb_sel_execute == 2'b00 && i_hazard_rd_wren_execute == 1'b1) && (rd_addr_execute != 5'd0) && (rd_addr_execute == i_hazard_rs1_addr_decode || rd_addr_execute == i_hazard_rs2_addr_decode)) begin

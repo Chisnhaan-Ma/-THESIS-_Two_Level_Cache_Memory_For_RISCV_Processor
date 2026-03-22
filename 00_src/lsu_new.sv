@@ -1,9 +1,11 @@
 // Author: Nhu Bui
 `ifndef LSU
 `define LSU
-`include "mux3_1.sv"
-`include "cache.sv"
-`include "cache_l2.sv"
+//`include "mux3_1.sv"
+//`include "cache.sv"
+`include "cache_v2.sv"
+`include "cache_l2_v2.sv"
+//`include "cache_l2.sv"
 `include "sram.sv"
 /*------------------------------------------------------------*/
 
@@ -40,7 +42,29 @@ module lsu_new (
     // Debug: bubble up cache hit
     output logic        o_cache_hit_debug,
     // Debug: bubble up cache miss
-    output logic        o_cache_miss_debug
+    output logic        o_cache_miss_debug,
+
+    // L2 SRAM physical pins (bubble up to top-level pipeline)
+    output logic        o_l2sram_ce_n,
+    output logic        o_l2sram_oe_n,
+    output logic        o_l2sram_we_n,
+    output logic        o_l2sram_lb_n,
+    output logic        o_l2sram_ub_n,
+    output logic [17:0] o_l2sram_addr,
+    inout  wire  [15:0] io_l2sram_dq,
+
+    // SDRAM physical interface pins (unused in SRAM-backed simulation path)
+    output logic        o_dram_clk,
+    output logic        o_dram_cke,
+    output logic        o_dram_cs_n,
+    output logic        o_dram_ras_n,
+    output logic        o_dram_cas_n,
+    output logic        o_dram_we_n,
+    output logic [1:0]  o_dram_ba,
+    output logic [11:0] o_dram_addr,
+    output logic        o_dram_ldqm,
+    output logic        o_dram_udqm,
+    inout  wire  [15:0] io_dram_dq
   );
 
   /*---------------------------------*/
@@ -58,10 +82,10 @@ module lsu_new (
   logic [31:0] input_bf_tmp;
   logic [31:0] output_bf_tmp;
   logic [31:0] data_mem_tmp;
-  logic [2:0]  slt_sl_tmp;
   logic [31:0] ld_cache_data;
   logic [31:0] st_cache_data;
   logic [3:0]  byte_mask;
+
 /*-------- Input buffer --------*/
   logic [31:0] INPUT;
   always_ff @(posedge i_clk) begin // ghi đồng bộ
@@ -73,7 +97,6 @@ module lsu_new (
  always_ff @ (posedge i_clk) begin
     data_out_1 <= input_bf_tmp;
     data_out_2 <= output_bf_tmp;
-    slt_sl_tmp <= slt_sl; 
  end
 
 /*-------- Cache + SRAM (replaces data mem) --------*/
@@ -102,12 +125,6 @@ module lsu_new (
     .byte_mask   (byte_mask)
   );
 
-  mask_load u_mask_load (
-    .slt_sl        (slt_sl_tmp),
-    .ld_data       (ld_cache_data),
-    .addr_sp       (i_lsu_addr[1:0]),
-    .data_after_load (data_out_3)
-  );
   mask_store u_mask_store (
     .slt_sl        (slt_sl),
     .st_data       (i_st_data),
@@ -115,7 +132,7 @@ module lsu_new (
     .data_to_cache (st_cache_data)
   );
   // Instantiate Cache; memory access only when demux selects data memory
-  cache u_cache (
+  cache_v2 u_cache (
     .i_clk         (i_clk),
     .i_reset       (i_reset),
     .i_mem_access  (en_datamem && i_mem_access),
@@ -123,44 +140,50 @@ module lsu_new (
     .i_addr        (i_lsu_addr),
     .i_byte_mask   (byte_mask),
     .i_wdata       (st_cache_data),
-    .o_rdata       (ld_cache_data /*data_out_3*/),
+    .o_rdata       (data_out_3),
     .o_hit_debug   (cache_hit_dbg),
     .o_miss_debug  (cache_miss_dbg),
     .o_stall       (o_cache_stall),
     .o_cache_done  (o_cache_done),
-    // SRAM interface
-    .o_sram_enb    (l1_l2_req_valid),
-    .o_sram_addr   (l1_l2_req_addr),
-    .o_sram_wr_en  (l1_l2_req_wr_en),
-    .o_sram_wdata  (l1_l2_req_wdata),
-    .i_sram_rdata  (l2_l1_resp_rdata),
-    .i_sram_ready  (l2_l1_resp_valid)
+    // Cache L2 interface
+    .o_cache_l2_enb    (l1_l2_req_valid),
+    .o_cache_l2_addr   (l1_l2_req_addr),
+    .o_cache_l2_wr_en  (l1_l2_req_wr_en),
+    .o_cache_l2_wdata  (l1_l2_req_wdata),
+    .i_cache_l2_rdata  (l2_l1_resp_rdata),
+    .i_cache_l2_ready  (l2_l1_resp_valid)
   );
 
-  // L2 cache serves L1 misses/hit-under-L2, and accesses SRAM on L2 miss
-  cache_l2 u_cache_l2 (
-    .i_clk          (i_clk),
-    .i_reset        (i_reset),
-    .i_req_valid    (l1_l2_req_valid),
-    .i_req_wr_en    (l1_l2_req_wr_en),
-    .i_req_byte_mask(l1_l2_req_wr_en ? 4'b1111 : 4'b0000),
-    .i_req_addr     (l1_l2_req_addr),
-    .i_req_wdata    (l1_l2_req_wdata),
-    .o_resp_rdata   (l2_l1_resp_rdata),
-    .o_resp_valid   (l2_l1_resp_valid),
-    .o_stall        (),
-    .o_hit_debug    (),
-    .o_miss_debug   (),
-    .o_sram_enb     (l2_sram_enb),
-    .o_sram_addr    (l2_sram_addr),
-    .o_sram_wr_en   (l2_sram_wr_en),
-    .o_sram_wdata   (l2_sram_wdata),
-    .i_sram_rdata   (sram_rdata),
-    .i_sram_ready   (sram_ready)
+  // L2 cache (IS61LV25616 as data array) serves L1 misses, accesses backing SRAM on L2 miss
+  cache_l2_v2 u_cache_l2 (
+    .i_clk           (i_clk),
+    .i_reset         (i_reset),
+    .i_req_valid     (l1_l2_req_valid),
+    .i_req_wr_en     (l1_l2_req_wr_en),
+    .i_req_addr      (l1_l2_req_addr),
+    .i_req_wdata     (l1_l2_req_wdata),
+    .o_resp_rdata    (l2_l1_resp_rdata),
+    .o_resp_valid    (l2_l1_resp_valid),
+    .o_stall         (),
+    .o_hit_debug     (),
+    .o_miss_debug    (),
+    .o_sram_enb      (l2_sram_enb),
+    .o_sram_addr     (l2_sram_addr),
+    .o_sram_wr_en    (l2_sram_wr_en),
+    .o_sram_wdata    (l2_sram_wdata),
+    .i_sram_rdata    (sram_rdata),
+    .i_sram_ready    (sram_ready),
+    // IS61LV25616 physical SRAM data array
+    .o_l2sram_ce_n   (o_l2sram_ce_n),
+    .o_l2sram_oe_n   (o_l2sram_oe_n),
+    .o_l2sram_we_n   (o_l2sram_we_n),
+    .o_l2sram_lb_n   (o_l2sram_lb_n),
+    .o_l2sram_ub_n   (o_l2sram_ub_n),
+    .o_l2sram_addr   (o_l2sram_addr),
+    .io_l2sram_dq    (io_l2sram_dq)
   );
 
-  // SRAM is now behind L2
-  sram u_sram (
+  sram u_sram(
     .i_clk      (i_clk),
     .i_reset    (i_reset),
     .i_sram_enb (l2_sram_enb),
@@ -170,7 +193,17 @@ module lsu_new (
     .o_rdata    (sram_rdata),
     .o_ready    (sram_ready)
   );
-
+  // SDRAM interface is not used when backing store is internal SRAM model.
+  assign o_dram_clk  = 1'b0;
+  assign o_dram_cke  = 1'b0;
+  assign o_dram_cs_n = 1'b1;
+  assign o_dram_ras_n= 1'b1;
+  assign o_dram_cas_n= 1'b1;
+  assign o_dram_we_n = 1'b1;
+  assign o_dram_ba   = 2'b00;
+  assign o_dram_addr = 12'b0;
+  assign o_dram_ldqm = 1'b1;
+  assign o_dram_udqm = 1'b1;
 /*-------- DEMUX --------*/
   demux_sel_mem demux_1 (
     .i_lsu_addr(i_lsu_addr[31:0]),
@@ -187,7 +220,7 @@ module lsu_new (
     .st_en_2_i     (i_lsu_wren),
     .i_clk         (i_clk), 
     .i_reset       (i_reset),
-    .data_out_2_o  (output_bf_tmp /*data_out_2*/), 
+    .data_out_2_o  (output_bf_tmp), 
     .io_lcd_o      (o_io_lcd), 
     .io_ledg_o     (o_io_ledg), 
     .io_ledr_o     (o_io_ledr), 
@@ -225,7 +258,7 @@ module mask_create (
 );
  localparam SW = 3'b010, SB = 3'b000, SH = 3'b001;
 
-  always_comb begin
+  always @ (*) begin
       case (slt_sl) 
         SW: byte_mask = 4'b1111;
         SB: begin
@@ -264,7 +297,7 @@ module mask_store (
 
   localparam SW = 3'b010, SB = 3'b000, SH = 3'b001;
 
-  always_comb begin
+  always @ (*) begin
       case (slt_sl) 
         SW: data_to_cache = st_data;
         SB: begin
@@ -287,65 +320,7 @@ module mask_store (
       endcase
 
   end
-
-
 endmodule
-`endif
-
-`ifndef MASK_LOAD
-`define MASK_LOAD
-module mask_load (
-  input logic [2:0] slt_sl,
-  input logic [31:0] ld_data,
-  input logic [1:0] addr_sp,
-  output logic [31:0] data_after_load
-);
-
-  localparam LW = 3'b101, LB = 3'b011, LH = 3'b100;
-  localparam LBU = 3'b110, LHU = 3'b111;
-
-  always_comb begin
-      /*
-      case (slt_sl) 
-        LW: data_after_load = ld_data;
-        LB: begin
-          case(addr_sp)
-            2'b00: data_after_load = {{24{ld_data[7]}}, ld_data[7:0]};
-            2'b01: data_after_load = {{24{ld_data[15]}}, ld_data[15:8]};
-            2'b10: data_after_load = {{24{ld_data[23]}}, ld_data[23:16]};
-            2'b11: data_after_load = {{24{ld_data[31]}}, ld_data[31:24]};
-            default: data_after_load = ld_data;
-          endcase
-        end
-        LH: begin
-          case(addr_sp[1])
-            1'b0: data_after_load = {{16{ld_data[15]}}, ld_data[15:0]};
-            1'b1: data_after_load = {{16{ld_data[31]}}, ld_data[31:16]};
-            default: data_after_load = ld_data;
-          endcase
-        end
-        LBU: begin
-          case(addr_sp)
-            2'b00: data_after_load = {24'b0, ld_data[7:0]};
-            2'b01: data_after_load = {24'b0, ld_data[15:8]};
-            2'b10: data_after_load = {24'b0, ld_data[23:16]};
-            2'b11: data_after_load = {24'b0, ld_data[31:24]};
-            default: data_after_load = ld_data;
-          endcase
-        end
-        LHU: begin
-          case(addr_sp[1])
-            1'b0: data_after_load = {16'b0, ld_data[15:0]};
-            1'b1: data_after_load = {16'b0, ld_data[31:16]};
-            default: data_after_load = ld_data;
-          endcase
-        end
-        default: data_after_load = ld_data;
-      endcase*/
-      data_after_load = ld_data;
-  end
-endmodule
-
 `endif
 
 `ifndef DEMUX_SEL_MEM
@@ -592,7 +567,7 @@ module mux_3_1_lsu(
 );
   logic [1:0] addr_sel ;
   logic [1:0] addr_sel_tmp;
-  always_comb begin
+  always @ (*) begin
       case (i_lsu_addr[31:16])
         16'h1001:  addr_sel  =  2'b00; // SW
         16'h1000:  addr_sel  =  2'b01; // LCD
@@ -613,11 +588,6 @@ module mux_3_1_lsu(
       default: o_ld_data = 32'd0;    
     endcase
   end
-/*
-  always_ff @ (posedge i_clk) begin
-	o_ld_data <= load_data_tmp;
-  end
-  */
 endmodule
 
 /*------------------------------------------------------------*/

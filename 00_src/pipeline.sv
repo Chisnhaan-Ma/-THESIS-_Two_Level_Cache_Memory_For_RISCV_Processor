@@ -36,7 +36,29 @@ module pipelined (
     // Debug: cache hit propagated from cache -> LSU -> MEM -> top
     output logic        o_cache_hit_debug,
     // Debug: cache miss propagated from cache -> LSU -> MEM -> top
-    output logic        o_cache_miss_debug
+    output logic        o_cache_miss_debug,
+
+    // L2 SRAM physical pins (for external real SRAM)
+    output logic        o_l2sram_ce_n,
+    output logic        o_l2sram_oe_n,
+    output logic        o_l2sram_we_n,
+    output logic        o_l2sram_lb_n,
+    output logic        o_l2sram_ub_n,
+    output logic [17:0] o_l2sram_addr,
+    inout  wire  [15:0] io_l2sram_dq,
+
+    // SDRAM physical interface pins (for external IS42S16400)
+    output logic        o_dram_clk,
+    output logic        o_dram_cke,
+    output logic        o_dram_cs_n,
+    output logic        o_dram_ras_n,
+    output logic        o_dram_cas_n,
+    output logic        o_dram_we_n,
+    output logic [1:0]  o_dram_ba,
+    output logic [11:0] o_dram_addr,
+    output logic        o_dram_ldqm,
+    output logic        o_dram_udqm,
+    inout  wire  [15:0] io_dram_dq
 );
 logic Stall;
 logic flush;
@@ -113,6 +135,24 @@ logic ctrl_wb;
 logic stall_cache;
 logic cache_hit_debug;
 logic cache_miss_debug;
+logic l2sram_ce_n;
+logic l2sram_oe_n;
+logic l2sram_we_n;
+logic l2sram_lb_n;
+logic l2sram_ub_n;
+logic [17:0] l2sram_addr;
+
+// SDRAM controller signals (from LSU sdram_controler instance through memory_cycle)
+logic        dram_clk;
+logic        dram_cke;
+logic        dram_cs_n;
+logic        dram_ras_n;
+logic        dram_cas_n;
+logic        dram_we_n;
+logic [1:0]  dram_ba;
+logic [11:0] dram_addr;
+logic        dram_ldqm;
+logic        dram_udqm;
     fetch_cycle fetch_top(
         .i_fetch_clk        (i_clk),
         .i_fetch_reset      (i_reset),
@@ -274,7 +314,27 @@ logic cache_miss_debug;
         .o_mem_cache_done        (o_cache_done),
         .o_mem_cache_hit_debug   (cache_hit_debug),
         .o_mem_cache_miss_debug  (cache_miss_debug),
-        .o_mem_slt_sl_wb          (slt_sl_wb)
+        .o_mem_slt_sl_wb          (slt_sl_wb),
+        .o_mem_l2sram_ce_n       (l2sram_ce_n),
+        .o_mem_l2sram_oe_n       (l2sram_oe_n),
+        .o_mem_l2sram_we_n       (l2sram_we_n),
+        .o_mem_l2sram_lb_n       (l2sram_lb_n),
+        .o_mem_l2sram_ub_n       (l2sram_ub_n),
+        .o_mem_l2sram_addr       (l2sram_addr),
+        .io_mem_l2sram_dq        (io_l2sram_dq),
+
+        // SDRAM physical interface pins (from SDRAM controller in LSU)
+        .o_mem_dram_clk          (dram_clk),
+        .o_mem_dram_cke          (dram_cke),
+        .o_mem_dram_cs_n         (dram_cs_n),
+        .o_mem_dram_ras_n        (dram_ras_n),
+        .o_mem_dram_cas_n        (dram_cas_n),
+        .o_mem_dram_we_n         (dram_we_n),
+        .o_mem_dram_ba           (dram_ba),
+        .o_mem_dram_addr         (dram_addr),
+        .o_mem_dram_ldqm         (dram_ldqm),
+        .o_mem_dram_udqm         (dram_udqm),
+        .io_mem_dram_dq          (io_dram_dq)
     );
 
     writeback_cycle writeback_top(
@@ -341,5 +401,23 @@ logic cache_miss_debug;
     assign o_ctrl = ctrl_wb;
     assign o_cache_hit_debug = cache_hit_debug;
     assign o_cache_miss_debug = cache_miss_debug;
+    assign o_l2sram_ce_n = l2sram_ce_n;
+    assign o_l2sram_oe_n = l2sram_oe_n;
+    assign o_l2sram_we_n = l2sram_we_n;
+    assign o_l2sram_lb_n = l2sram_lb_n;
+    assign o_l2sram_ub_n = l2sram_ub_n;
+    assign o_l2sram_addr = l2sram_addr;
+
+    // Assign SDRAM physical pins from internal signals
+    assign o_dram_clk = dram_clk; //memory_top.lsu_memory.o_dram_clk; // dram_clk;
+    assign o_dram_cke = dram_cke;
+    assign o_dram_cs_n = dram_cs_n;
+    assign o_dram_ras_n = dram_ras_n;
+    assign o_dram_cas_n = dram_cas_n;
+    assign o_dram_we_n = dram_we_n;
+    assign o_dram_ba = dram_ba;
+    assign o_dram_addr = dram_addr;
+    assign o_dram_ldqm = dram_ldqm;
+    assign o_dram_udqm = dram_udqm;
 endmodule
 `endif

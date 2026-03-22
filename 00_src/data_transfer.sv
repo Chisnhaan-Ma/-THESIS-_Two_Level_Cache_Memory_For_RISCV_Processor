@@ -16,7 +16,7 @@ module data_transfer(
     logic [7:0]  selected_byte;
     logic [15:0] selected_half;
 
-    always_comb begin
+    always @ (*) begin
         case (i_byte_offset)
             2'b00: selected_byte = i_ld_data[7:0];
             2'b01: selected_byte = i_ld_data[15:8];
@@ -25,14 +25,14 @@ module data_transfer(
         endcase
     end
 
-    always_comb begin
+    always @ (*) begin
         if (i_byte_offset[1] == 1'b0)
             selected_half = i_ld_data[15:0];
         else
             selected_half = i_ld_data[31:16];
     end
 
-    always_comb begin
+    always @ (*) begin
         case (i_load_type)
             LB:  o_ld_result = {{24{selected_byte[7]}}, selected_byte};
             LH:  o_ld_result = {{16{selected_half[15]}}, selected_half};

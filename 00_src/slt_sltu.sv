@@ -19,7 +19,7 @@ module slt_sltu (
     );
 
     // So sánh
-    always_comb begin
+    always @ (*) begin
         if (Sel == 1'b0) begin  // SLT (có dấu)
             // Nếu khác dấu: A<0 && B>=0 → 1; B<0 && A>=0 → 0
             // Nếu cùng dấu: dùng bit dấu của (A - B)

@@ -11,7 +11,7 @@ module branch_taken (
     localparam BGE = 3'b101;
     localparam BLTU = 3'b110;
     localparam BGEU = 3'b111;
-	always_comb begin
+	always @ (*) begin
         if (i_inst_mem[6:0] == 7'b1100011) begin : B_TYPE
             case (i_inst_mem[14:12])
                 BEQ:   o_pc_sel = i_br_equal_mem;    //BEQ

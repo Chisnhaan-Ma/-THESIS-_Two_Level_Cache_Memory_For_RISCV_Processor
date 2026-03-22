@@ -6,7 +6,7 @@ module shift_right_arithmetic (
     input  logic [4:0] shift_amt, // Số bit cần dịch
     output logic [31:0] data_out); //Kết quả
 
-    always_comb begin
+    always @ (*) begin
         case (shift_amt)
             5'd0:  data_out = data_in;
             5'd1:  data_out = {data_in[31], data_in[31:1]};

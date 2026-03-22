@@ -6,7 +6,7 @@ module shift_left_logical (
     output logic [31:0] data_out);   // Kết quả
 
 
-    always_comb begin
+    always @ (*) begin
         case (shift_amt)
             5'd0:  data_out = data_in;
             5'd1:  data_out = {data_in[30:0], 1'b0};
