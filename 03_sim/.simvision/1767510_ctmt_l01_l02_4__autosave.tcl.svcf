@@ -1,0 +1,175 @@
+
+#
+# Preferences
+#
+preferences set plugin-enable-svdatabrowser-new 1
+preferences set plugin-enable-groupscope 0
+preferences set plugin-enable-interleaveandcompare 0
+preferences set plugin-enable-waveformfrequencyplot 0
+preferences set savedlg-simulator ppe
+
+#
+# Databases
+#
+database require wave -search {
+	./wave.shm/wave.trn
+	/home/yellow/ctmt_l01_l02_4/workspace/milestone_3_cache/03_sim/wave.shm/wave.trn
+}
+
+#
+# Mnemonic Maps
+#
+mmap new  -reuse -name {Boolean as Logic} -radix %b -contents {{%c=FALSE -edgepriority 1 -shape low}
+{%c=TRUE -edgepriority 1 -shape high}}
+mmap new  -reuse -name {Example Map} -radix %x -contents {{%b=11???? -bgcolor orange -label REG:%x -linecolor yellow -shape bus}
+{%x=1F -bgcolor red -label ERROR -linecolor white -shape EVENT}
+{%x=2C -bgcolor red -label ERROR -linecolor white -shape EVENT}
+{%x=* -label %x -linecolor gray -shape bus}}
+
+#
+# Waveform windows
+#
+if {[catch {window new WaveWindow -name "Waveform 1" -geometry 1920x1025+0+31}] != ""} {
+    window geometry "Waveform 1" 1920x1025+0+31
+}
+window target "Waveform 1" on
+waveform using {Waveform 1}
+waveform sidebar select designbrowser
+waveform set \
+    -primarycursor TimeA \
+    -signalnames name \
+    -signalwidth 175 \
+    -units ns \
+    -valuewidth 65
+waveform baseline set -time 0
+
+set id [waveform add -signals  {
+	{wave::tbench.dut.fetch_top.o_fetch_pc_id[31:0]}
+	} ]
+set id [waveform add -signals  {
+	{wave::tbench.dut.fetch_top.o_fetch_inst_id[31:0]}
+	} ]
+set id [waveform add -signals  {
+	{wave::tbench.dut.memory_top.i_mem_alu_data[31:0]}
+	} ]
+set id [waveform add -signals  {
+	wave::tbench.dut.memory_top.lsu_memory.u_cache.i_mem_access
+	} ]
+set id [waveform add -signals  {
+	{wave::tbench.dut.memory_top.i_mem_inst[31:0]}
+	} ]
+set id [waveform add -signals  {
+	{wave::tbench.dut.memory_top.lsu_memory.u_cache.current_state[3:0]}
+	} ]
+set id [waveform add -signals  {
+	{wave::tbench.dut.memory_top.lsu_memory.u_cache.o_sram_addr[31:0]}
+	} ]
+set id [waveform add -signals  {
+	wave::tbench.dut.memory_top.lsu_memory.u_cache.o_sram_enb
+	} ]
+set id [waveform add -signals  {
+	wave::tbench.dut.memory_top.lsu_memory.u_cache.o_sram_wr_en
+	} ]
+set id [waveform add -signals  {
+	{wave::tbench.dut.memory_top.lsu_memory.u_cache.o_sram_wdata[31:0]}
+	} ]
+set id [waveform add -signals  {
+	{wave::tbench.dut.memory_top.lsu_memory.u_cache.o_sram_addr[31:0]}
+	} ]
+set id [waveform add -signals  {
+	wave::tbench.dut.memory_top.lsu_memory.u_cache.i_wr_en
+	} ]
+set id [waveform add -signals  {
+	wave::tbench.dut.memory_top.lsu_memory.u_cache.o_stall
+	} ]
+set id [waveform add -signals  {
+	wave::tbench.dut.fetch_top.i_stall
+	} ]
+set id [waveform add -signals  {
+	wave::tbench.dut.branch_taken_top.flush
+	} ]
+set id [waveform add -signals  {
+	{wave::tbench.dut.memory_top.i_mem_pc[31:0]}
+	} ]
+set id [waveform add -signals  {
+	{wave::tbench.dut.memory_top.o_mem_ld_data_wb[31:0]}
+	} ]
+set id [waveform add -signals  {
+	{wave::tbench.dut.writeback_top.i_wb_alu_data[31:0]}
+	} ]
+set id [waveform add -signals  {
+	{wave::tbench.dut.writeback_top.i_wb_inst[31:0]}
+	} ]
+set id [waveform add -signals  {
+	{wave::tbench.dut.writeback_top.i_wb_ld_data[31:0]}
+	} ]
+set id [waveform add -signals  {
+	{wave::tbench.dut.writeback_top.i_wb_ld_data[31:0]}
+	} ]
+set id [waveform add -signals  {
+	{wave::tbench.dut.writeback_top.o_wb_data_wb[31:0]}
+	} ]
+set id [waveform add -signals  {
+	wave::tbench.dut.branch_taken_top.flush
+	} ]
+set id [waveform add -signals  {
+	{wave::tbench.dut.fetch_top.i_fetch_alu_data[31:0]}
+	} ]
+set id [waveform add -signals  {
+	wave::tbench.dut.fetch_top.i_fetch_pc_sel
+	} ]
+set id [waveform add -signals  {
+	{wave::tbench.dut.execute_top.i_execute_rs1_data[31:0]}
+	} ]
+set id [waveform add -signals  {
+	{wave::tbench.dut.execute_top.i_execute_rs2_data[31:0]}
+	} ]
+set id [waveform add -signals  {
+	{wave::tbench.dut.execute_top.i_execute_fwd_wb_data[31:0]}
+	} ]
+set id [waveform add -signals  {
+	{wave::tbench.dut.execute_top.mux_forward_operand_b.data_0_i[31:0]}
+	} ]
+set id [waveform add -signals  {
+	{wave::tbench.dut.execute_top.mux_forward_operand_b.data_1_i[31:0]}
+	} ]
+set id [waveform add -signals  {
+	{wave::tbench.dut.execute_top.mux_forward_operand_b.data_2_i[31:0]}
+	} ]
+set id [waveform add -signals  {
+	{wave::tbench.dut.execute_top.mux_forward_operand_b.data_out_o[31:0]}
+	} ]
+set id [waveform add -signals  {
+	{wave::tbench.dut.execute_top.mux_forward_operand_b.sel_i[1:0]}
+	} ]
+set id [waveform add -signals  {
+	{wave::tbench.dut.forward_top.o_fwd_operand_a_execute[1:0]}
+	} ]
+set id [waveform add -signals  {
+	{wave::tbench.dut.forward_top.o_fwd_operand_b_execute[1:0]}
+	} ]
+set id [waveform add -signals  {
+	{wave::tbench.dut.forward_top.i_fwd_rd_addr_at_wb[4:0]}
+	} ]
+set id [waveform add -signals  {
+	{wave::tbench.dut.writeback_top.i_wb_inst[31:0]}
+	} ]
+set id [waveform add -signals  {
+	{wave::tbench.dut.writeback_top.o_wb_data_wb[31:0]}
+	} ]
+
+waveform xview limits 42063.4ns 42124ns
+
+#
+# Waveform Window Links
+#
+
+#
+# Console windows
+#
+console set -windowname Console
+window geometry Console 600x250+0+0
+
+#
+# Layout selection
+#

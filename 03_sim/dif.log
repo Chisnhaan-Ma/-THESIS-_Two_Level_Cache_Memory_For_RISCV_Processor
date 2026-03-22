@@ -1,0 +1,118 @@
+2c2
+< TOOL:	xrun(64)	24.09-s005: Started on Dec 07, 2025 at 11:41:11 +07
+---
+> TOOL:	xrun(64)	24.09-s005: Started on Dec 05, 2025 at 22:15:14 +07
+39,43c39,43
+< Recompiling... reason: file '../00_src/lsu_new.sv' is newer than expected.
+< 	expected: Sun Dec  7 11:34:30 2025
+< 	actual:   Sun Dec  7 11:41:09 2025
+< file: ./../00_src/lsu_new.sv
+< 	module worklib.datamem_syn:sv
+---
+> Recompiling... reason: file '../00_src/pipeline.sv' is newer than expected.
+> 	expected: Fri Dec  5 21:17:34 2025
+> 	actual:   Fri Dec  5 22:15:13 2025
+> file: ./../00_src/regfile.sv
+> 	module worklib.regfile:sv
+45c45,46
+< 	module worklib.demux_sel_mem:sv
+---
+> file: ./../00_src/shift_left_logical.sv
+> 	module worklib.shift_left_logical:sv
+47c48,49
+< 	module worklib.output_buffer:sv
+---
+> file: ./../00_src/shift_right_arithmetic.sv
+> 	module worklib.shift_right_arithmetic:sv
+49c51,52
+< 	module worklib.data_trsf:sv
+---
+> file: ./../00_src/shift_right_logical.sv
+> 	module worklib.shift_right_logical:sv
+51c54,67
+< 	module worklib.mux_3_1_lsu:sv
+---
+> file: ./../00_src/slt_sltu.sv
+> 	module worklib.slt_sltu:sv
+> 		errors: 0, warnings: 0
+> file: ./../00_src/writeback_cycle.sv
+> 	module worklib.writeback_cycle:sv
+> 		errors: 0, warnings: 0
+> file: ./../01_bench/driver.sv
+> 	module worklib.driver:sv
+> 		errors: 0, warnings: 0
+> file: ./../01_bench/scoreboard.sv
+> 	module worklib.scoreboard:sv
+> 		errors: 0, warnings: 0
+> file: ./../01_bench/tbench.sv
+> 	module worklib.tbench:sv
+72c88
+< xmelab: *W,CUVWSP (../00_src/memory_cycle.sv,97|35): 1 output port was not connected:
+---
+> xmelab: *W,CUVWSP (../00_src/memory_cycle.sv,91|35): 1 output port was not connected:
+78c94
+< 		datamem
+---
+> 		datamem_syn
+82,93c98,117
+< 		worklib.mux_3_1_lsu:sv <0x68781fe1>
+< 			streams:   4, words:  1034
+< 		worklib.data_trsf:sv <0x51747460>
+< 			streams:   2, words:  5479
+< 		worklib.output_buffer:sv <0x5bc26f3a>
+< 			streams:  31, words: 10958
+< 		worklib.demux_sel_mem:sv <0x1e22689e>
+< 			streams:   1, words:  1301
+< 		worklib.datamem_syn:sv <0x76cf5617>
+< 			streams:  22, words: 14149
+< 		worklib.data_trsf:sv <0x7818869d>
+< 			streams:   2, words:  5094
+---
+> 		worklib.scoreboard:sv <0x760cd3f5>
+> 			streams:   7, words: 10981
+> 		worklib.driver:sv <0x7af64e3f>
+> 			streams:   1, words:   210
+> 		worklib.writeback_cycle:sv <0x46d3fa21>
+> 			streams:   4, words:  1614
+> 		worklib.slt_sltu:sv <0x4dbbc53c>
+> 			streams:   4, words:  1575
+> 		worklib.shift_right_arithmetic:sv <0x3809fb3d>
+> 			streams:   1, words:  4899
+> 		worklib.shift_right_logical:sv <0x0f5ba437>
+> 			streams:   1, words:  3360
+> 		worklib.shift_left_logical:sv <0x32abb2df>
+> 			streams:   1, words:  3184
+> 		worklib.regfile:sv <0x332d61fe>
+> 			streams:   4, words:  2798
+> 		worklib.pipelined:sv <0x7f2ef55d>
+> 			streams: 118, words: 33491
+> 		worklib.tbench:sv <0x685963f5>
+> 			streams:  38, words:  9706
+98,100c122,124
+< 		Modules:                 239      36
+< 		Registers:               800     380
+< 		Scalar wires:          1,684       -
+---
+> 		Modules:                 238      35
+> 		Registers:               784     364
+> 		Scalar wires:          1,683       -
+102,103c126,127
+< 		Vectored wires:          376       -
+< 		Always blocks:            53      44
+---
+> 		Vectored wires:          369       -
+> 		Always blocks:            49      40
+105,106c129,130
+< 		Cont. assignments:       283      92
+< 		Pseudo assignments:    1,009       -
+---
+> 		Cont. assignments:       282      90
+> 		Pseudo assignments:    1,004       -
+108c132
+< 		Process Clocks:           16       5
+---
+> 		Process Clocks:           14       5
+9478c9502
+< TOOL:	xrun(64)	24.09-s005: Exiting on Dec 07, 2025 at 11:41:16 +07  (total: 00:00:05)
+---
+> TOOL:	xrun(64)	24.09-s005: Exiting on Dec 05, 2025 at 22:15:18 +07  (total: 00:00:04)
